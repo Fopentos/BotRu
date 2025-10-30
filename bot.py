@@ -1,11 +1,11 @@
 import os
 import logging
-import sqlite3
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import random
 
+import asyncpg
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')
+
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN not found!")
     exit(1)
@@ -46,200 +48,186 @@ class TaskCreation(StatesGroup):
     waiting_for_reward = State()
     waiting_for_description = State()
 
-class SubscriptionCheck(StatesGroup):
-    waiting_for_subscription = State()
-
-# База данных SQLite
+# Асинхронная база данных PostgreSQL
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('pyara.db', check_same_thread=False)
-        self.create_tables()
+        self.pool = None
     
-    def create_tables(self):
-        cursor = self.conn.cursor()
-        
-        # Таблица пользователей
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                balance INTEGER DEFAULT 1000,
-                total_earned INTEGER DEFAULT 0,
-                total_spent INTEGER DEFAULT 0,
-                registered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Таблица заданий
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                creator_id INTEGER,
-                channel_id TEXT,
-                channel_title TEXT,
-                channel_username TEXT,
-                reward INTEGER,
-                description TEXT,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                completed_by INTEGER,
-                completed_date TIMESTAMP,
-                FOREIGN KEY (creator_id) REFERENCES users (user_id)
-            )
-        ''')
-        
-        # Таблица выполненных заданий (для предотвращения повторного выполнения)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS completed_tasks (
-                user_id INTEGER,
-                task_id INTEGER,
-                completed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, task_id)
-            )
-        ''')
-        
-        # Таблица подписок (отслеживание кто на кого подписан)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                user_id INTEGER,
-                channel_id TEXT,
-                subscribed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, channel_id)
-            )
-        ''')
-        
-        self.conn.commit()
+    async def connect(self):
+        self.pool = await asyncpg.create_pool(DATABASE_URL)
+        await self.create_tables()
     
-    def get_user(self, user_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT * FROM users WHERE user_id = ?', 
-            (user_id,)
-        )
-        return cursor.fetchone()
-    
-    def create_user(self, user_id: int, username: str, first_name: str):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO users (user_id, username, first_name, balance) 
-            VALUES (?, ?, ?, 1000)
-        ''', (user_id, username, first_name))
-        self.conn.commit()
-    
-    def update_balance(self, user_id: int, amount: int):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'UPDATE users SET balance = balance + ? WHERE user_id = ?',
-            (amount, user_id)
-        )
-        
-        if amount > 0:
-            cursor.execute(
-                'UPDATE users SET total_earned = total_earned + ? WHERE user_id = ?',
-                (amount, user_id)
-            )
-        else:
-            cursor.execute(
-                'UPDATE users SET total_spent = total_spent + ? WHERE user_id = ?',
-                (abs(amount), user_id)
-            )
-        
-        self.conn.commit()
-    
-    def create_task(self, creator_id: int, channel_id: str, channel_title: str, 
-                   channel_username: str, reward: int, description: str):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT INTO tasks 
-            (creator_id, channel_id, channel_title, channel_username, reward, description)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (creator_id, channel_id, channel_title, channel_username, reward, description))
-        self.conn.commit()
-        return cursor.lastrowid
-    
-    def get_active_tasks(self, exclude_user_id: int = None):
-        cursor = self.conn.cursor()
-        if exclude_user_id:
-            cursor.execute('''
-                SELECT t.*, u.username as creator_username 
-                FROM tasks t
-                JOIN users u ON t.creator_id = u.user_id
-                WHERE t.is_active = TRUE 
-                AND t.creator_id != ?
-                ORDER BY t.created_date DESC
-            ''', (exclude_user_id,))
-        else:
-            cursor.execute('''
-                SELECT t.*, u.username as creator_username 
-                FROM tasks t
-                JOIN users u ON t.creator_id = u.user_id
-                WHERE t.is_active = TRUE 
-                ORDER BY t.created_date DESC
+    async def create_tables(self):
+        async with self.pool.acquire() as conn:
+            # Таблица пользователей
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    balance INTEGER DEFAULT 1000,
+                    total_earned INTEGER DEFAULT 0,
+                    total_spent INTEGER DEFAULT 0,
+                    registered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             ''')
-        return cursor.fetchall()
+            
+            # Таблица заданий
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id SERIAL PRIMARY KEY,
+                    creator_id BIGINT,
+                    channel_id TEXT,
+                    channel_title TEXT,
+                    channel_username TEXT,
+                    reward INTEGER,
+                    description TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_by BIGINT,
+                    completed_date TIMESTAMP,
+                    FOREIGN KEY (creator_id) REFERENCES users (user_id)
+                )
+            ''')
+            
+            # Таблица выполненных заданий
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS completed_tasks (
+                    user_id BIGINT,
+                    task_id INTEGER,
+                    completed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, task_id)
+                )
+            ''')
+            
+            # Таблица подписок
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    user_id BIGINT,
+                    channel_id TEXT,
+                    subscribed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, channel_id)
+                )
+            ''')
     
-    def get_user_tasks(self, user_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT * FROM tasks 
-            WHERE creator_id = ? 
-            ORDER BY created_date DESC
-        ''', (user_id,))
-        return cursor.fetchall()
+    async def get_user(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(
+                'SELECT * FROM users WHERE user_id = $1', 
+                user_id
+            )
     
-    def complete_task(self, task_id: int, user_id: int):
-        cursor = self.conn.cursor()
-        
-        # Получаем информацию о задании
-        cursor.execute('SELECT * FROM tasks WHERE task_id = ?', (task_id,))
-        task = cursor.fetchone()
-        
-        if not task:
-            return False
-        
-        # Помечаем задание выполненным
-        cursor.execute('''
-            UPDATE tasks 
-            SET is_active = FALSE, completed_by = ?, completed_date = CURRENT_TIMESTAMP
-            WHERE task_id = ?
-        ''', (user_id, task_id))
-        
-        # Добавляем в историю выполненных
-        cursor.execute('''
-            INSERT OR IGNORE INTO completed_tasks (user_id, task_id)
-            VALUES (?, ?)
-        ''', (user_id, task_id))
-        
-        # Начисляем вознаграждение исполнителю
-        reward = task[5]  # reward находится в 6-й колонке (индекс 5)
-        self.update_balance(user_id, reward)
-        
-        self.conn.commit()
-        return True
+    async def create_user(self, user_id: int, username: str, first_name: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO users (user_id, username, first_name, balance) 
+                VALUES ($1, $2, $3, 1000)
+                ON CONFLICT (user_id) DO NOTHING
+            ''', user_id, username, first_name)
     
-    def has_completed_task(self, user_id: int, task_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT 1 FROM completed_tasks 
-            WHERE user_id = ? AND task_id = ?
-        ''', (user_id, task_id))
-        return cursor.fetchone() is not None
+    async def update_balance(self, user_id: int, amount: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET balance = balance + $1 WHERE user_id = $2',
+                amount, user_id
+            )
+            
+            if amount > 0:
+                await conn.execute(
+                    'UPDATE users SET total_earned = total_earned + $1 WHERE user_id = $2',
+                    amount, user_id
+                )
+            else:
+                await conn.execute(
+                    'UPDATE users SET total_spent = total_spent + $1 WHERE user_id = $2',
+                    abs(amount), user_id
+                )
     
-    def add_subscription(self, user_id: int, channel_id: str):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO subscriptions (user_id, channel_id)
-            VALUES (?, ?)
-        ''', (user_id, channel_id))
-        self.conn.commit()
+    async def create_task(self, creator_id: int, channel_id: str, channel_title: str, 
+                         channel_username: str, reward: int, description: str):
+        async with self.pool.acquire() as conn:
+            task_id = await conn.fetchval('''
+                INSERT INTO tasks 
+                (creator_id, channel_id, channel_title, channel_username, reward, description)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING task_id
+            ''', creator_id, channel_id, channel_title, channel_username, reward, description)
+            return task_id
     
-    def get_user_subscriptions(self, user_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT channel_id FROM subscriptions WHERE user_id = ?
-        ''', (user_id,))
-        return [row[0] for row in cursor.fetchall()]
+    async def get_active_tasks(self, exclude_user_id: int = None):
+        async with self.pool.acquire() as conn:
+            if exclude_user_id:
+                return await conn.fetch('''
+                    SELECT t.*, u.username as creator_username 
+                    FROM tasks t
+                    JOIN users u ON t.creator_id = u.user_id
+                    WHERE t.is_active = TRUE 
+                    AND t.creator_id != $1
+                    ORDER BY t.created_date DESC
+                ''', exclude_user_id)
+            else:
+                return await conn.fetch('''
+                    SELECT t.*, u.username as creator_username 
+                    FROM tasks t
+                    JOIN users u ON t.creator_id = u.user_id
+                    WHERE t.is_active = TRUE 
+                    ORDER BY t.created_date DESC
+                ''')
+    
+    async def get_user_tasks(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch('''
+                SELECT * FROM tasks 
+                WHERE creator_id = $1 
+                ORDER BY created_date DESC
+            ''', user_id)
+    
+    async def complete_task(self, task_id: int, user_id: int):
+        async with self.pool.acquire() as conn:
+            # Получаем информацию о задании
+            task = await conn.fetchrow(
+                'SELECT * FROM tasks WHERE task_id = $1', 
+                task_id
+            )
+            
+            if not task:
+                return False
+            
+            # Помечаем задание выполненным
+            await conn.execute('''
+                UPDATE tasks 
+                SET is_active = FALSE, completed_by = $1, completed_date = CURRENT_TIMESTAMP
+                WHERE task_id = $2
+            ''', user_id, task_id)
+            
+            # Добавляем в историю выполненных
+            await conn.execute('''
+                INSERT INTO completed_tasks (user_id, task_id)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id, task_id) DO NOTHING
+            ''', user_id, task_id)
+            
+            # Начисляем вознаграждение исполнителю
+            reward = task['reward']
+            await self.update_balance(user_id, reward)
+            
+            return True
+    
+    async def has_completed_task(self, user_id: int, task_id: int):
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchrow('''
+                SELECT 1 FROM completed_tasks 
+                WHERE user_id = $1 AND task_id = $2
+            ''', user_id, task_id)
+            return result is not None
+    
+    async def add_subscription(self, user_id: int, channel_id: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO subscriptions (user_id, channel_id)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id, channel_id) DO NOTHING
+            ''', user_id, channel_id)
 
 # Инициализация базы данных
 db = Database()
@@ -267,7 +255,7 @@ async def cmd_start(message: types.Message):
     user = message.from_user
     
     # Регистрируем пользователя если нужно
-    db.create_user(user.id, user.username, user.first_name)
+    await db.create_user(user.id, user.username, user.first_name)
     
     await message.answer(
         f"👋 <b>Добро пожаловать, {user.first_name}!</b>\n\n"
@@ -284,11 +272,11 @@ async def cmd_start(message: types.Message):
 # Баланс
 @dp.message(F.text == "💰 Баланс")
 async def show_balance(message: types.Message):
-    user_data = db.get_user(message.from_user.id)
+    user_data = await db.get_user(message.from_user.id)
     if user_data:
-        balance = user_data[3]  # balance в 4-й колонке
-        total_earned = user_data[4]  # total_earned в 5-й колонке
-        total_spent = user_data[5]  # total_spent в 6-й колонке
+        balance = user_data['balance']
+        total_earned = user_data['total_earned']
+        total_spent = user_data['total_spent']
         
         await message.answer(
             f"💰 <b>Ваш баланс:</b> {balance} 💷\n\n"
@@ -300,17 +288,17 @@ async def show_balance(message: types.Message):
 # Статистика
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
-    user_data = db.get_user(message.from_user.id)
-    user_tasks = db.get_user_tasks(message.from_user.id)
+    user_data = await db.get_user(message.from_user.id)
+    user_tasks = await db.get_user_tasks(message.from_user.id)
     
     if user_data:
-        balance = user_data[3]
-        total_earned = user_data[4]
-        total_spent = user_data[5]
+        balance = user_data['balance']
+        total_earned = user_data['total_earned']
+        total_spent = user_data['total_spent']
         
         # Статистика по заданиям
-        active_tasks = len([t for t in user_tasks if t[7]])  # is_active в 8-й колонке
-        completed_tasks = len([t for t in user_tasks if not t[7] and t[9]])  # completed_by в 10-й колонке
+        active_tasks = len([t for t in user_tasks if t['is_active']])
+        completed_tasks = len([t for t in user_tasks if not t['is_active'] and t['completed_by']])
         
         await message.answer(
             f"📊 <b>Ваша статистика:</b>\n\n"
@@ -326,12 +314,12 @@ async def show_stats(message: types.Message):
 # Начало создания задания
 @dp.message(F.text == "➕ Создать задание")
 async def start_task_creation(message: types.Message, state: FSMContext):
-    user_data = db.get_user(message.from_user.id)
+    user_data = await db.get_user(message.from_user.id)
     if not user_data:
         await message.answer("❌ Сначала зарегистрируйтесь через /start")
         return
     
-    balance = user_data[3]
+    balance = user_data['balance']
     if balance < 100:
         await message.answer(
             "❌ <b>Недостаточно средств!</b>\n\n"
@@ -414,7 +402,7 @@ async def process_channel(message: types.Message, state: FSMContext):
     await message.answer(
         f"✅ <b>Канал получен:</b> {channel_info['title']}\n\n"
         f"💷 <b>Шаг 2:</b> Введите сумму вознаграждения (от 100 до 5000 💷)\n\n"
-        f"💰 <b>Ваш текущий баланс:</b> {db.get_user(message.from_user.id)[3]} 💷",
+        f"💰 <b>Ваш текущий баланс:</b> {(await db.get_user(message.from_user.id))['balance']} 💷",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(TaskCreation.waiting_for_reward)
@@ -429,8 +417,8 @@ async def process_reward(message: types.Message, state: FSMContext):
     
     try:
         reward = int(message.text)
-        user_data = db.get_user(message.from_user.id)
-        balance = user_data[3]
+        user_data = await db.get_user(message.from_user.id)
+        balance = user_data['balance']
         
         if reward < 100:
             await message.answer("❌ Минимальная сумма вознаграждения: 100 💷")
@@ -476,10 +464,10 @@ async def process_description(message: types.Message, state: FSMContext):
     description = message.text if message.text != "❌ Отмена" else "Подписка на канал"
     
     # Списываем средства
-    db.update_balance(message.from_user.id, -reward)
+    await db.update_balance(message.from_user.id, -reward)
     
     # Создаем задание
-    task_id = db.create_task(
+    task_id = await db.create_task(
         creator_id=message.from_user.id,
         channel_id=channel_info['id'],
         channel_title=channel_info['title'],
@@ -496,7 +484,7 @@ async def process_description(message: types.Message, state: FSMContext):
         f"💷 <b>Вознаграждение:</b> {reward} 💷\n"
         f"📝 <b>Описание:</b> {description}\n\n"
         f"🆔 <b>ID задания:</b> {task_id}\n\n"
-        f"💰 <b>Новый баланс:</b> {db.get_user(message.from_user.id)[3]} 💷\n\n"
+        f"💰 <b>Новый баланс:</b> {(await db.get_user(message.from_user.id))['balance']} 💷\n\n"
         f"👥 Теперь другие пользователи смогут выполнить ваше задание!",
         reply_markup=get_main_keyboard()
     )
@@ -504,14 +492,14 @@ async def process_description(message: types.Message, state: FSMContext):
 # Список активных заданий
 @dp.message(F.text == "📋 Активные задания")
 async def show_active_tasks(message: types.Message):
-    tasks = db.get_active_tasks(exclude_user_id=message.from_user.id)
+    tasks = await db.get_active_tasks(exclude_user_id=message.from_user.id)
     
     if not tasks:
         await message.answer(
             "😔 <b>Нет доступных заданий</b>\n\n"
             "В данный момент нет активных заданий от других пользователей.\n\n"
             "💡 <b>Совет:</b> Создайте свое задание чтобы привлечь подписчиков!",
-            reply_markup=get_main_keyboard()
+            reply_mmarkup=get_main_keyboard()
         )
         return
     
@@ -521,11 +509,11 @@ async def show_active_tasks(message: types.Message):
     )
     
     for task in tasks[:10]:  # Показываем первые 10 заданий
-        task_id = task[0]
-        channel_title = task[3]
-        reward = task[5]
-        description = task[6] or "Подписка на канал"
-        creator_username = task[11] or "Пользователь"
+        task_id = task['task_id']
+        channel_title = task['channel_title']
+        reward = task['reward']
+        description = task['description'] or "Подписка на канал"
+        creator_username = task['creator_username'] or "Пользователь"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"🎯 Выполнить за {reward} 💷", callback_data=f"do_task_{task_id}")]
@@ -542,7 +530,7 @@ async def show_active_tasks(message: types.Message):
 # Мои задания
 @dp.message(F.text == "🎯 Мои задания")
 async def show_my_tasks(message: types.Message):
-    tasks = db.get_user_tasks(message.from_user.id)
+    tasks = await db.get_user_tasks(message.from_user.id)
     
     if not tasks:
         await message.answer(
@@ -552,8 +540,8 @@ async def show_my_tasks(message: types.Message):
         )
         return
     
-    active_tasks = [t for t in tasks if t[7]]  # is_active
-    completed_tasks = [t for t in tasks if not t[7] and t[9]]  # completed_by
+    active_tasks = [t for t in tasks if t['is_active']]
+    completed_tasks = [t for t in tasks if not t['is_active'] and t['completed_by']]
     
     await message.answer(
         f"📋 <b>Ваши задания:</b>\n\n"
@@ -562,11 +550,11 @@ async def show_my_tasks(message: types.Message):
     )
     
     for task in tasks[:10]:  # Показываем первые 10
-        task_id = task[0]
-        channel_title = task[3]
-        reward = task[5]
-        is_active = task[7]
-        completed_by = task[9]
+        task_id = task['task_id']
+        channel_title = task['channel_title']
+        reward = task['reward']
+        is_active = task['is_active']
+        completed_by = task['completed_by']
         
         status = "🟢 Активно" if is_active else "✅ Выполнено"
         
@@ -579,27 +567,27 @@ async def show_my_tasks(message: types.Message):
 
 # Обработка выполнения задания
 @dp.callback_query(F.data.startswith("do_task_"))
-async def process_task_completion(callback: CallbackQuery, state: FSMContext):
+async def process_task_completion(callback: CallbackQuery):
     task_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     
     # Проверяем, не выполнял ли пользователь уже это задание
-    if db.has_completed_task(user_id, task_id):
+    if await db.has_completed_task(user_id, task_id):
         await callback.answer("❌ Вы уже выполняли это задание!", show_alert=True)
         return
     
     # Получаем информацию о задании
-    tasks = db.get_active_tasks()
-    task = next((t for t in tasks if t[0] == task_id), None)
+    tasks = await db.get_active_tasks()
+    task = next((t for t in tasks if t['task_id'] == task_id), None)
     
     if not task:
         await callback.answer("❌ Задание уже выполнено или удалено!", show_alert=True)
         return
     
-    channel_id = task[2]
-    channel_title = task[3]
-    channel_username = task[4]
-    reward = task[5]
+    channel_id = task['channel_id']
+    channel_title = task['channel_title']
+    channel_username = task['channel_username']
+    reward = task['reward']
     
     # Проверяем подписку пользователя
     try:
@@ -608,11 +596,11 @@ async def process_task_completion(callback: CallbackQuery, state: FSMContext):
         
         if is_subscribed:
             # Пользователь уже подписан
-            db.complete_task(task_id, user_id)
-            db.add_subscription(user_id, channel_id)
+            await db.complete_task(task_id, user_id)
+            await db.add_subscription(user_id, channel_id)
             
-            user_data = db.get_user(user_id)
-            new_balance = user_data[3]
+            user_data = await db.get_user(user_id)
+            new_balance = user_data['balance']
             
             await callback.message.edit_text(
                 f"✅ <b>Задание выполнено!</b>\n\n"
@@ -649,16 +637,16 @@ async def check_subscription(callback: CallbackQuery):
     user_id = callback.from_user.id
     
     # Получаем информацию о задании
-    tasks = db.get_active_tasks()
-    task = next((t for t in tasks if t[0] == task_id), None)
+    tasks = await db.get_active_tasks()
+    task = next((t for t in tasks if t['task_id'] == task_id), None)
     
     if not task:
         await callback.answer("❌ Задание уже выполнено или удалено!", show_alert=True)
         return
     
-    channel_id = task[2]
-    channel_title = task[3]
-    reward = task[5]
+    channel_id = task['channel_id']
+    channel_title = task['channel_title']
+    reward = task['reward']
     
     try:
         # Проверяем подписку
@@ -667,11 +655,11 @@ async def check_subscription(callback: CallbackQuery):
         
         if is_subscribed:
             # Задание выполнено успешно
-            db.complete_task(task_id, user_id)
-            db.add_subscription(user_id, channel_id)
+            await db.complete_task(task_id, user_id)
+            await db.add_subscription(user_id, channel_id)
             
-            user_data = db.get_user(user_id)
-            new_balance = user_data[3]
+            user_data = await db.get_user(user_id)
+            new_balance = user_data['balance']
             
             await callback.message.edit_text(
                 f"✅ <b>Задание выполнено!</b>\n\n"
@@ -716,6 +704,11 @@ async def show_help(message: types.Message):
 
 # Запуск бота
 async def main():
+    # Подключаемся к базе данных
+    await db.connect()
+    logger.info("✅ Подключение к базе данных установлено")
+    
+    # Запускаем бота
     logger.info("🚀 Бот взаимного пиара запускается...")
     await dp.start_polling(bot)
 
