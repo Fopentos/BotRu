@@ -52,6 +52,7 @@ class SimpleDB:
         if channel_id not in self.admins:
             self.admins[channel_id] = set()
         self.admins[channel_id].add(owner_id)
+        logger.info(f"✅ Channel added: {channel_title} (ID: {channel_id})")
     
     def get_user_channels(self, user_id):
         return [channel for channel_id, channel in self.channels.items() 
@@ -85,7 +86,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             request_id=1,
             chat_is_channel=True,
             bot_is_member=True
-        ))]
+        ))],
+        [KeyboardButton("🔄 Альтернативный способ")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     
@@ -94,14 +96,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 Я бот для автоматического принятия заявок в приватных Telegram-каналах\n\n"
         "⚡ **Оптимизирован для массового принятия (3000+ заявок)**\n"
         "🚀 Скорость: 10 заявок в секунду\n\n"
-        "📋 **Чтобы начать:**\n"
-        "1. Нажмите кнопку '📢 Добавить канал' ниже\n"
-        "2. Выберите ваш приватный канал\n"
-        "3. Бот автоматически проверит права и добавит канал\n\n"
+        "📋 **Способы добавления канала:**\n"
+        "1. 📢 Нажмите 'Добавить канал' и выберите канал\n"
+        "2. 🔄 Перешлите любое сообщение из канала\n"
+        "3. 📎 Отправьте пригласительную ссылку\n\n"
         "🔧 **Требования:**\n"
         "• Бот должен быть администратором канала\n"
-        "• Все права должны быть включены\n"
-        "• Канал должен быть приватным",
+        "• Все права должны быть включены",
         reply_markup=reply_markup
     )
 
@@ -109,10 +110,12 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Обработка выбора канала через кнопку"""
     user_id = str(update.effective_user.id)
     
+    logger.info(f"Chat shared received: {update.message.chat_shared}")
+    
     if not update.message.chat_shared:
         await update.message.reply_text(
             "❌ Не удалось получить информацию о канале.\n"
-            "Попробуйте еще раз, нажав кнопку '📢 Добавить канал'",
+            "Попробуйте альтернативный способ.",
             reply_markup=ReplyKeyboardRemove()
         )
         return
@@ -124,6 +127,8 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Получаем информацию о канале
         bot = context.bot
         chat = await bot.get_chat(channel_id)
+        
+        logger.info(f"Processing channel: {chat.title} (ID: {chat.id}, Type: {chat.type})")
         
         # Проверяем тип чата - должен быть каналом
         if chat.type != Chat.CHANNEL:
@@ -137,8 +142,10 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Проверяем, является ли бот администратором
         try:
             bot_member = await chat.get_member(bot.id)
+            logger.info(f"Bot member info: {type(bot_member)}")
         except BadRequest as e:
-            if "Bot is not a member" in str(e):
+            logger.error(f"Error getting bot member: {e}")
+            if "Bot is not a member" in str(e) or "Chat not found" in str(e):
                 await update.message.reply_text(
                     "❌ Бот не является администратором этого канала!\n\n"
                     "📋 **Чтобы добавить бота:**\n"
@@ -149,7 +156,7 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     "   ✓ Добавлять подписчиков\n"
                     "   ✓ Приглашать пользователей\n"
                     "   ✓ Одобрять заявки\n\n"
-                    "После этого нажмите кнопку '📢 Добавить канал' снова",
+                    "После этого попробуйте снова",
                     reply_markup=ReplyKeyboardRemove()
                 )
                 return
@@ -174,6 +181,8 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not bot_member.can_restrict_members:
             missing_permissions.append("❌ Ограничивать участников")
         
+        logger.info(f"Bot permissions - invite: {bot_member.can_invite_users}, promote: {bot_member.can_promote_members}, restrict: {bot_member.can_restrict_members}")
+        
         if missing_permissions:
             await update.message.reply_text(
                 "❌ Недостаточно прав для принятия заявок!\n\n"
@@ -184,7 +193,7 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "2. Выберите бота\n"
                 "3. Включите ВСЕ права\n"
                 "4. Сохраните изменения\n"
-                "5. Нажмите кнопку '📢 Добавить канал' снова",
+                "5. Попробуйте снова",
                 reply_markup=ReplyKeyboardRemove()
             )
             return
@@ -221,6 +230,7 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             join_requests = await bot.get_chat_join_requests(chat.id)
             pending_count = len(list(join_requests))
+            logger.info(f"Found {pending_count} pending join requests")
         except Exception as e:
             logger.warning(f"Could not get join requests: {e}")
             pending_count = 0
@@ -241,15 +251,146 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"Error adding channel: {e}")
         await update.message.reply_text(
-            "❌ Произошла ошибка при добавлении канала\n\n"
-            "Попробуйте еще раз или проверьте права бота в канале.",
+            f"❌ Произошла ошибка при добавлении канала: {str(e)}\n\n"
+            "Попробуйте альтернативный способ добавления канала.",
             reply_markup=ReplyKeyboardRemove()
         )
+
+async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка пересланных сообщений из каналов"""
+    user_id = str(update.effective_user.id)
+    
+    if not update.message.forward_from_chat:
+        return
+    
+    forwarded_chat = update.message.forward_from_chat
+    
+    # Проверяем, что переслано из канала
+    if forwarded_chat.type != Chat.CHANNEL:
+        await update.message.reply_text(
+            "❌ Это не канал! Пожалуйста, перешлите сообщение из канала."
+        )
+        return
+    
+    try:
+        # Получаем информацию о канале
+        bot = context.bot
+        chat = await bot.get_chat(forwarded_chat.id)
+        
+        logger.info(f"Processing forwarded channel: {chat.title} (ID: {chat.id})")
+        
+        # Проверяем, является ли бот администратором
+        try:
+            bot_member = await chat.get_member(bot.id)
+        except BadRequest as e:
+            if "Bot is not a member" in str(e):
+                await update.message.reply_text(
+                    f"❌ Бот не является администратором канала '{chat.title}'!\n\n"
+                    "📋 **Чтобы добавить бота:**\n"
+                    "1. Зайдите в настройки канала\n"
+                    "2. Выберите 'Администраторы'\n"
+                    "3. Добавьте бота как администратора\n"
+                    "4. Дайте ВСЕ права\n\n"
+                    "После этого перешлите сообщение из канала снова"
+                )
+                return
+            else:
+                raise e
+        
+        if not isinstance(bot_member, ChatMemberAdministrator):
+            await update.message.reply_text(
+                f"❌ Бот не является администратором канала '{chat.title}'!\n"
+                "Дайте боту права администратора и попробуйте снова."
+            )
+            return
+        
+        # Проверяем права
+        missing_permissions = []
+        if not bot_member.can_invite_users:
+            missing_permissions.append("❌ Приглашать пользователей")
+        if not bot_member.can_promote_members:
+            missing_permissions.append("❌ Добавлять участников")
+        if not bot_member.can_restrict_members:
+            missing_permissions.append("❌ Ограничивать участников")
+        
+        if missing_permissions:
+            await update.message.reply_text(
+                f"❌ Недостаточно прав в канале '{chat.title}'!\n\n"
+                "Боту нужны ВСЕ эти права:\n" +
+                "\n".join(missing_permissions) +
+                "\n\nОбновите права бота и попробуйте снова."
+            )
+            return
+        
+        # Проверяем, не добавлен ли уже канал
+        existing_channel = db.get_channel_by_id(str(chat.id))
+        if existing_channel:
+            keyboard = [
+                [KeyboardButton("🚀 Принять все заявки")],
+                [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
+            await update.message.reply_text(
+                f"✅ Канал '{chat.title}' уже добавлен!\n\n"
+                f"🚀 Для принятия заявок нажмите '🚀 Принять все заявки'",
+                reply_markup=reply_markup
+            )
+            return
+        
+        # Сохраняем в базу данных
+        db.add_channel(str(chat.id), chat.title, user_id, chat.type)
+        
+        # Получаем текущие заявки
+        try:
+            join_requests = await bot.get_chat_join_requests(chat.id)
+            pending_count = len(list(join_requests))
+        except:
+            pending_count = 0
+        
+        keyboard = [
+            [KeyboardButton("🚀 Принять все заявки")],
+            [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        success_message = (
+            f"✅ **Канал добавлен через пересланное сообщение!**\n\n"
+            f"📝 **Название:** {chat.title}\n"
+            f"⏳ **Ожидающих заявок:** {pending_count}\n\n"
+            f"🚀 **Для принятия заявок нажмите '🚀 Принять все заявки'**"
+        )
+        
+        await update.message.reply_text(success_message, reply_markup=reply_markup)
+        
+    except Exception as e:
+        logger.error(f"Error processing forwarded message: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка пригласительных ссылок (альтернативный способ)"""
+    user_id = str(update.effective_user.id)
+    text = update.message.text
+    
+    # Простые проверки на пригласительную ссылку
+    if not any(x in text for x in ['t.me/', 'telegram.me/', '+', '@']):
+        return
+    
+    await update.message.reply_text(
+        "🔗 **Обнаружена пригласительная ссылка**\n\n"
+        "К сожалению, добавление по ссылкам временно не работает.\n\n"
+        "📋 **Используйте другие способы:**\n"
+        "• Нажмите '📢 Добавить канал' и выберите канал\n"
+        "• Перешлите любое сообщение из канала\n\n"
+        "Эти способы более надежны и работают лучше!"
+    )
 
 async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатий на кнопки"""
     user_id = str(update.effective_user.id)
     text = update.message.text
+    
+    logger.info(f"Button pressed: {text} by user {user_id}")
     
     if text == "📢 Добавить канал":
         # Показываем кнопку для добавления канала
@@ -263,6 +404,22 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text(
             "Выберите канал из списка:",
+            reply_markup=reply_markup
+        )
+        
+    elif text == "🔄 Альтернативный способ":
+        keyboard = [
+            [KeyboardButton("📢 Добавить канал")],
+            [KeyboardButton("🚀 Принять все заявки")],
+            [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        await update.message.reply_text(
+            "📋 **Альтернативные способы добавления канала:**\n\n"
+            "1. **Перешлите сообщение** - просто перешлите любое сообщение из вашего канала\n"
+            "2. **Кнопка 'Добавить канал'** - нажмите кнопку ниже и выберите канал\n\n"
+            "Оба способа требуют, чтобы бот был администратором канала.",
             reply_markup=reply_markup
         )
         
@@ -287,6 +444,9 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
             "Выберите действие:",
             reply_markup=reply_markup
         )
+
+# ... остальные функции (list_channels, status_command, turbo_approve, approve_single_request, help_command, process_join_requests) 
+# остаются без изменений из предыдущей версии ...
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Список каналов пользователя"""
@@ -342,7 +502,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Используем первый канал (можно расширить для выбора)
+    # Используем первый канал
     channel = user_channels[0]
     
     try:
@@ -581,14 +741,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚡ **Оптимизирован для 3000+ заявок**
 
-**🔗 КАК НАЧАТЬ:**
-1. Нажмите "📢 Добавить канал"
-2. Выберите ваш канал из списка
-3. Бот автоматически проверит права и добавит канал
+**🔗 СПОСОБЫ ДОБАВЛЕНИЯ КАНАЛА:**
+1. **Кнопка 'Добавить канал'** - нажмите и выберите канал
+2. **Пересылка сообщения** - перешлите любое сообщение из канала
+3. **Альтернативный способ** - если основные не работают
 
 **📋 КНОПКИ УПРАВЛЕНИЯ:**
 📢 Добавить канал - Выбрать канал для работы
-🚀 Принять все заявки - Быстро принять ВСЕ заявки
+🚀 Принять все заявки - Быстро принять ВСЕ заявки  
 📊 Статус - Проверить статус обработки
 📋 Мои каналы - Список ваших каналов
 
@@ -603,11 +763,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - До 10 заявок в секунду
 - 3200 заявок = ~5.5 минут
 - Автоматическое возобновление
-- Защита от ограничений Telegram
 
 **🚀 ДЛЯ 3200 ЗАЯВОК:**
-1. Нажмите "📢 Добавить канал" и выберите канал
-2. Нажмите "🚀 Принять все заявки"
+1. Добавьте канал любым способом
+2. Нажмите '🚀 Принять все заявки'
 3. Ждем ~5.5 минут
 4. Готово!
     """
@@ -624,6 +783,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая обработка новых заявок"""
+    channels_count = len(db.channels)
+    logger.info(f"🔍 Checking {channels_count} channels for join requests")
+    
     for channel_id, channel in db.channels.items():
         if not channel['is_active'] or not channel['auto_approve']:
             continue
@@ -635,7 +797,7 @@ async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
             if not requests_list:
                 continue
             
-            logger.info(f"Processing {len(requests_list)} new requests for {channel['channel_title']}")
+            logger.info(f"🔄 Processing {len(requests_list)} new requests for {channel['channel_title']}")
             
             # Ограничение скорости - 10 заявок в секунду
             requests_per_second = 10
@@ -669,15 +831,15 @@ async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
         except TelegramError as e:
             error_msg = str(e).lower()
             if "chat not found" in error_msg or "bot was kicked" in error_msg:
-                logger.warning(f"Bot was removed from {channel['channel_title']}")
+                logger.warning(f"❌ Bot was removed from {channel['channel_title']}")
                 channel['is_active'] = False
             elif "not enough rights" in error_msg:
-                logger.warning(f"Not enough rights in {channel['channel_title']}")
+                logger.warning(f"❌ Not enough rights in {channel['channel_title']}")
                 channel['is_active'] = False
             else:
-                logger.error(f"Error processing requests for {channel['channel_title']}: {e}")
+                logger.error(f"❌ Error processing requests for {channel['channel_title']}: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error for {channel['channel_title']}: {e}")
+            logger.error(f"❌ Unexpected error for {channel['channel_title']}: {e}")
 
 def main():
     """Запуск бота"""
@@ -694,7 +856,10 @@ def main():
     # Обработчик выбора канала через кнопку
     application.add_handler(MessageHandler(filters.CHAT_SHARED, handle_chat_shared))
     
-    # Обработчик нажатий на кнопки
+    # Обработчик пересланных сообщений
+    application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded_message))
+    
+    # Обработчик текстовых сообщений (кнопки и ссылки)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button_actions))
     
     # Настраиваем планировщик для фоновой обработки
@@ -706,6 +871,8 @@ def main():
         args=[application]
     )
     scheduler.start()
+    
+    logger.info("🚀 Bot starting...")
     
     # Запускаем бота
     port = int(os.environ.get('PORT', 8443))
