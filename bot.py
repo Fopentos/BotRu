@@ -276,61 +276,62 @@ async def process_channel(message: types.Message, state: FSMContext):
             return
     
     if not channel_info:
-    await message.answer("❌ Пожалуйста, перешлите сообщение из канала или отправьте @username канала")
-    return
+        await message.answer("❌ Пожалуйста, перешлите сообщение из канала или отправьте @username канала")
+        return
 
     # Проверяем, является ли бот администратором канала
-try:
-    # Используем channel_info вместо forwarded_chat
-    bot_member = await bot.get_chat_member(int(channel_info['id']), bot.id)
-    
-    # Правильная проверка: является ли бот администратором
-    if not isinstance(bot_member, types.ChatMemberAdministrator):
+    try:
+        # Используем channel_info вместо forwarded_chat
+        bot_member = await bot.get_chat_member(int(channel_info['id']), bot.id)
+        
+        # Правильная проверка: является ли бот администратором
+        if not isinstance(bot_member, types.ChatMemberAdministrator):
+            await message.answer(
+                f"❌ <b>Бот не является администратором канала '{channel_info['title']}'!</b>\n\n"
+                "Добавьте бота как администратора с правом просмотра участников, "
+                "чтобы можно было проверять подписки.",
+                reply_markup=get_main_keyboard()
+            )
+            await state.clear()
+            return
+        
+        # Проверяем конкретные права
+        missing_permissions = []
+        if not bot_member.can_invite_users:
+            missing_permissions.append("❌ Приглашать пользователей")
+        # Для принятия заявок на вступление нужно право can_invite_users
+        if not bot_member.can_invite_users:
+            missing_permissions.append("❌ Одобрять заявки")
+        
+        if missing_permissions:
+            await message.answer(
+                f"❌ <b>Недостаточно прав в канале '{channel_info['title']}'!</b>\n\n"
+                "Боту нужны ВСЕ эти права:\n" +
+                "\n".join(missing_permissions) +
+                "\n\nОбновите права бота и попробуйте снова."
+            )
+            await state.clear()
+            return
+            
+    except Exception as e:
         await message.answer(
-            f"❌ <b>Бот не является администратором канала '{channel_info['title']}'!</b>\n\n"
-            "Добавьте бота как администратора с правом просмотра участников, "
-            "чтобы можно было проверять подписки.",
+            f"❌ <b>Ошибка доступа к каналу:</b> {str(e)}\n\n"
+            "Убедитесь что бот добавлен как администратор.",
             reply_markup=get_main_keyboard()
         )
         await state.clear()
         return
+
+    await state.update_data(channel_info=channel_info)
     
-    # Проверяем конкретные права
-    missing_permissions = []
-    if not bot_member.can_invite_users:
-        missing_permissions.append("❌ Приглашать пользователей")
-    # Для принятия заявок на вступление нужно право can_invite_users
-    if not bot_member.can_invite_users:
-        missing_permissions.append("❌ Одобрять заявки")
-    
-    if missing_permissions:
-        await message.answer(
-            f"❌ <b>Недостаточно прав в канале '{channel_info['title']}'!</b>\n\n"
-            "Боту нужны ВСЕ эти права:\n" +
-            "\n".join(missing_permissions) +
-            "\n\nОбновите права бота и попробуйте снова."
-        )
-        await state.clear()
-        return
-        
-except Exception as e:
     await message.answer(
-        f"❌ <b>Ошибка доступа к каналу:</b> {str(e)}\n\n"
-        "Убедитесь что бот добавлен как администратор.",
-        reply_markup=get_main_keyboard()
+        f"✅ <b>Канал получен:</b> {channel_info['title']}\n\n"
+        f"💷 <b>Шаг 2:</b> Введите сумму вознаграждения (от 100 до 5000 💷)\n\n"
+        f"💰 <b>Ваш текущий баланс:</b> {(await db.get_user(message.from_user.id))['balance']} 💷",
+        reply_markup=get_cancel_keyboard()
     )
-    await state.clear()
-    return
+    await state.set_state(TaskCreation.waiting_for_reward)
 
-await state.update_data(channel_info=channel_info)
-
-await message.answer(
-    f"✅ <b>Канал получен:</b> {channel_info['title']}\n\n"
-    f"💷 <b>Шаг 2:</b> Введите сумму вознаграждения (от 100 до 5000 💷)\n\n"
-    f"💰 <b>Ваш текущий баланс:</b> {(await db.get_user(message.from_user.id))['balance']} 💷",
-    reply_markup=get_cancel_keyboard()
-)
-await state.set_state(TaskCreation.waiting_for_reward)
 # Обработка суммы вознаграждения
 @dp.message(TaskCreation.waiting_for_reward)
 async def process_reward(message: types.Message, state: FSMContext):
