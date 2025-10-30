@@ -95,8 +95,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 Скорость: 10 заявок в секунду\n\n"
         "📋 **Способы добавления канала:**\n"
         "1. 📢 Нажмите 'Добавить канал' для инструкций\n"
-        "2. 🔄 Перешлите любое сообщение из канала\n"
-        "3. 📎 Отправьте пригласительную ссылку\n\n"
+        "2. 🔄 Перешлите любое сообщение из канала\n\n"
         "🔧 **Требования:**\n"
         "• Бот должен быть администратором канала\n"
         "• Все права должны быть включены",
@@ -192,11 +191,13 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         db.add_channel(str(chat.id), chat.title, user_id, chat.type)
         
         # Получаем текущие заявки
+        pending_count = 0
         try:
-            join_requests = await bot.get_chat_join_requests(chat.id)
+            # В новой версии используем правильный метод
+            join_requests = await bot.get_chat_join_requests(chat_id=chat.id)
             pending_count = len(list(join_requests))
-        except:
-            pending_count = 0
+        except Exception as e:
+            logger.warning(f"Could not get join requests: {e}")
         
         keyboard = [
             [KeyboardButton("🚀 Принять все заявки")],
@@ -216,24 +217,6 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logger.error(f"Error processing forwarded message: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
-
-async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка пригласительных ссылок"""
-    user_id = str(update.effective_user.id)
-    text = update.message.text
-    
-    # Простые проверки на пригласительную ссылку
-    if not any(x in text for x in ['t.me/', 'telegram.me/', '+', '@']):
-        return
-    
-    await update.message.reply_text(
-        "🔗 **Обнаружена пригласительная ссылка**\n\n"
-        "К сожалению, добавление по ссылкам временно не работает.\n\n"
-        "📋 **Используйте другие способы:**\n"
-        "• Перешлите любое сообщение из канала\n"
-        "• Убедитесь, что бот добавлен как администратор\n\n"
-        "Пересылка сообщений более надежна и работает лучше!"
-    )
 
 async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатий на кнопки"""
@@ -346,10 +329,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем текущие заявки
-        join_requests = await context.bot.get_chat_join_requests(
-            chat_id=channel['channel_id']
-        )
-        
+        join_requests = await context.bot.get_chat_join_requests(chat_id=channel['channel_id'])
         pending_count = len(list(join_requests))
         total_approved = channel.get('total_approved', 0)
         
@@ -409,10 +389,7 @@ async def turbo_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем все заявки
-        join_requests = await context.bot.get_chat_join_requests(
-            chat_id=channel['channel_id']
-        )
-        
+        join_requests = await context.bot.get_chat_join_requests(chat_id=channel['channel_id'])
         requests_list = list(join_requests)
         total = len(requests_list)
         
@@ -456,7 +433,7 @@ async def turbo_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
                 
             success = await approve_single_request(
-                context, 
+                context.bot, 
                 channel['channel_id'], 
                 request.user.id,
                 channel['channel_title']
@@ -532,10 +509,10 @@ async def turbo_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in turbo mode: {e}")
         await update.message.reply_text(f"❌ **Критическая ошибка:** {str(e)}")
 
-async def approve_single_request(context, channel_id, user_id, channel_title):
+async def approve_single_request(bot, channel_id, user_id, channel_title):
     """Принятие одной заявки с обработкой ошибок"""
     try:
-        await context.bot.approve_chat_join_request(
+        await bot.approve_chat_join_request(
             chat_id=channel_id,
             user_id=user_id
         )
@@ -615,7 +592,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(help_text, reply_markup=reply_markup)
 
-async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
+async def process_join_requests(bot: Bot):
     """Фоновая обработка новых заявок"""
     channels_count = len(db.channels)
     logger.info(f"🔍 Checking {channels_count} channels for join requests")
@@ -625,7 +602,7 @@ async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
             continue
             
         try:
-            join_requests = await context.bot.get_chat_join_requests(chat_id=channel_id)
+            join_requests = await bot.get_chat_join_requests(chat_id=channel_id)
             requests_list = list(join_requests)
             
             if not requests_list:
@@ -643,7 +620,7 @@ async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
                     continue
                     
                 success = await approve_single_request(
-                    context, 
+                    bot, 
                     channel_id, 
                     request.user.id,
                     channel['channel_title']
@@ -690,7 +667,7 @@ def main():
     # Обработчик пересланных сообщений
     application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded_message))
     
-    # Обработчик текстовых сообщений (кнопки и ссылки)
+    # Обработчик текстовых сообщений (кнопки)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button_actions))
     
     # Настраиваем планировщик для фоновой обработки
@@ -699,7 +676,7 @@ def main():
         process_join_requests,
         'interval',
         seconds=20,
-        args=[application]
+        args=[application.bot]
     )
     scheduler.start()
     
