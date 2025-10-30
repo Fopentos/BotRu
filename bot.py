@@ -51,12 +51,6 @@ class SimpleDB:
         return [channel for channel_id, channel in self.channels.items() 
                 if user_id in self.admins.get(channel_id, set())]
     
-    def get_channel_by_invite(self, invite_link):
-        for channel_id, channel in self.channels.items():
-            if channel['invite_link'] == invite_link:
-                return channel
-        return None
-    
     def get_channel_by_id(self, channel_id):
         return self.channels.get(channel_id)
     
@@ -74,29 +68,6 @@ class SimpleDB:
 
 # Инициализируем базу данных
 db = SimpleDB()
-
-def extract_invite_link(text):
-    """Извлекает пригласительную ссылку из текста"""
-    # Паттерны для пригласительных ссылок
-    patterns = [
-        r'https?://t\.me/\+[\w-]+',
-        r'https?://telegram\.me/\+[\w-]+',
-        r'@[\w-]+',
-        r'\+[\w-]+'
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            link = matches[0]
-            # Если это не полная ссылка, преобразуем в полную
-            if link.startswith('+'):
-                return f"https://t.me/{link}"
-            elif link.startswith('@'):
-                return f"https://t.me/{link[1:]}"
-            return link
-    
-    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда начала работы с ботом"""
@@ -143,7 +114,29 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         # Проверяем, есть ли бот в канале и его права
         bot = context.bot
-        chat = await bot.get_chat(invite_link)
+        
+        # Пробуем получить информацию о канале
+        try:
+            chat = await bot.get_chat(invite_link)
+        except BadRequest as e:
+            if "Chat not found" in str(e):
+                await update.message.reply_text(
+                    "❌ Не удалось найти канал по этой ссылке!\n\n"
+                    "🔧 **Возможные причины:**\n"
+                    "• Бот не добавлен в канал как администратор\n"
+                    "• Неправильная пригласительная ссылка\n"
+                    "• Канал не существует\n\n"
+                    "✅ **Решение:**\n"
+                    "1. Добавьте бота в канал как администратора\n"
+                    "2. Убедитесь, что бот имеет права:\n"
+                    "   - Приглашать пользователей\n"
+                    "   - Добавлять участников\n"
+                    "   - Одобрять заявки\n"
+                    "3. Отправьте правильную пригласительную ссылку"
+                )
+                return
+            else:
+                raise e
         
         # Проверяем тип чата - должен быть каналом
         if chat.type != Chat.CHANNEL:
@@ -154,7 +147,25 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         
         # Проверяем, является ли бот администратором
-        bot_member = await chat.get_member(bot.id)
+        try:
+            bot_member = await chat.get_member(bot.id)
+        except BadRequest as e:
+            if "Bot is not a member" in str(e) or "Chat not found" in str(e):
+                await update.message.reply_text(
+                    "❌ Бот не является участником канала!\n\n"
+                    "📋 **Чтобы добавить бота:**\n"
+                    "1. Зайдите в настройки канала\n"
+                    "2. Выберите 'Администраторы'\n"
+                    "3. Добавьте бота как администратора\n"
+                    "4. Дайте ВСЕ права (особенно важны):\n"
+                    "   ✓ Добавлять подписчиков\n"
+                    "   ✓ Приглашать пользователей\n"
+                    "   ✓ Одобрять заявки\n\n"
+                    "🔗 **После добавления отправьте ссылку снова**"
+                )
+                return
+            else:
+                raise e
         
         if not isinstance(bot_member, ChatMemberAdministrator):
             await update.message.reply_text(
@@ -185,7 +196,12 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "❌ Недостаточно прав для принятия заявок!\n\n"
                 "Боту нужны ВСЕ эти права:\n" +
                 "\n".join(missing_permissions) +
-                "\n\n🔧 **Обновите права бота в настройках канала**"
+                "\n\n🔧 **Обновите права бота в настройках канала:**\n"
+                "1. Зайдите в 'Администраторы'\n"
+                "2. Выберите бота\n"
+                "3. Включите ВСЕ права\n"
+                "4. Сохраните изменения\n"
+                "5. Отправьте ссылку снова"
             )
             return
         
@@ -228,7 +244,8 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             join_requests = await bot.get_chat_join_requests(chat.id)
             pending_count = len(list(join_requests))
             success_message += f"⏳ **Ожидающих заявок:** {pending_count}\n\n"
-        except:
+        except Exception as e:
+            logger.warning(f"Could not get join requests: {e}")
             pending_count = 0
         
         success_message += (
@@ -249,11 +266,17 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "1. Канал существует\n"
                 "2. Бот добавлен как администратор\n"
                 "3. У бота есть ВСЕ необходимые права\n"
-                "4. Вы используете правильную пригласительную ссылку"
+                "4. Вы используете правильную пригласительную ссылку\n\n"
+                "✅ **После исправления отправьте ссылку снова**"
             )
         elif "not enough rights" in error_msg:
             await update.message.reply_text(
-                "❌ Недостаточно прав! Дайте боту ВСЕ права администратора."
+                "❌ Недостаточно прав! Дайте боту ВСЕ права администратора.\n\n"
+                "📋 **Необходимые права:**\n"
+                "• Приглашать пользователей\n"
+                "• Добавлять участников\n"
+                "• Одобрять заявки\n"
+                "• Ограничивать участников"
             )
         elif "invite link invalid" in error_msg:
             await update.message.reply_text(
@@ -267,7 +290,36 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ Ошибка: {e}")
     except Exception as e:
         logger.error(f"Error adding channel: {e}")
-        await update.message.reply_text("❌ Произошла неизвестная ошибка при добавлении канала")
+        await update.message.reply_text(
+            "❌ Произошла неизвестная ошибка при добавлении канала\n\n"
+            "🔧 **Попробуйте:**\n"
+            "1. Перезагрузить бота командой /start\n"
+            "2. Отправить ссылку еще раз\n"
+            "3. Проверить права бота в канале"
+        )
+
+def extract_invite_link(text):
+    """Извлекает пригласительную ссылку из текста"""
+    # Паттерны для пригласительных ссылок
+    patterns = [
+        r'https?://t\.me/\+[\w-]+',
+        r'https?://telegram\.me/\+[\w-]+',
+        r'@[\w-]+',
+        r'\+[\w-]+'
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            link = matches[0]
+            # Если это не полная ссылка, преобразуем в полную
+            if link.startswith('+'):
+                return f"https://t.me/{link}"
+            elif link.startswith('@'):
+                return f"https://t.me/{link[1:]}"
+            return link
+    
+    return None
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Список каналов пользователя"""
@@ -575,52 +627,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_text(help_text)
 
-def main():
-    """Запуск бота"""
-    # Создаем приложение
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Добавляем обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("list", list_channels))
-    application.add_handler(CommandHandler("turbo", turbo_approve))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("help", help_command))
-    
-    # Обработчик пригласительных ссылок
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_invite_link))
-    
-    # Настраиваем планировщик для фоновой обработки
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        process_join_requests,
-        'interval',
-        seconds=20,
-        args=[application]
-    )
-    scheduler.start()
-    
-    # Запускаем бота
-    port = int(os.environ.get('PORT', 8443))
-    
-    # Проверяем, на Railway ли мы
-    if 'RAILWAY_STATIC_URL' in os.environ or 'PORT' in os.environ:
-        # Webhook режим для Railway
-        webhook_url = os.environ.get('RAILWAY_STATIC_URL', '')
-        if webhook_url:
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=BOT_TOKEN,
-                webhook_url=f"{webhook_url}/{BOT_TOKEN}"
-            )
-        else:
-            logger.info("🚀 Starting bot in POLLING mode...")
-            application.run_polling()
-    else:
-        logger.info("🚀 Starting bot in POLLING mode...")
-        application.run_polling()
-
 async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая обработка новых заявок"""
     for channel_id, channel in db.channels.items():
@@ -677,6 +683,52 @@ async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error processing requests for {channel['channel_title']}: {e}")
         except Exception as e:
             logger.error(f"Unexpected error for {channel['channel_title']}: {e}")
+
+def main():
+    """Запуск бота"""
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Добавляем обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("list", list_channels))
+    application.add_handler(CommandHandler("turbo", turbo_approve))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("help", help_command))
+    
+    # Обработчик пригласительных ссылок
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_invite_link))
+    
+    # Настраиваем планировщик для фоновой обработки
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        process_join_requests,
+        'interval',
+        seconds=20,
+        args=[application]
+    )
+    scheduler.start()
+    
+    # Запускаем бота
+    port = int(os.environ.get('PORT', 8443))
+    
+    # Проверяем, на Railway ли мы
+    if 'RAILWAY_STATIC_URL' in os.environ or 'PORT' in os.environ:
+        # Webhook режим для Railway
+        webhook_url = os.environ.get('RAILWAY_STATIC_URL', '')
+        if webhook_url:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=BOT_TOKEN,
+                webhook_url=f"{webhook_url}/{BOT_TOKEN}"
+            )
+        else:
+            logger.info("🚀 Starting bot in POLLING mode...")
+            application.run_polling()
+    else:
+        logger.info("🚀 Starting bot in POLLING mode...")
+        application.run_polling()
 
 if __name__ == '__main__':
     main()
