@@ -1,8 +1,15 @@
 import os
 import logging
 import asyncio
-import re
-from telegram import Update, Bot, ChatMemberAdministrator, Chat
+from telegram import (
+    Update, 
+    Bot, 
+    ChatMemberAdministrator, 
+    Chat,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove
+)
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.error import TelegramError, BadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -30,14 +37,13 @@ class SimpleDB:
         self.stats = {}
         self.processed_users = set()
     
-    def add_channel(self, channel_id, channel_title, owner_id, chat_type, invite_link):
+    def add_channel(self, channel_id, channel_title, owner_id, chat_type):
         self.channels[channel_id] = {
             'channel_title': channel_title,
             'owner_id': owner_id,
             'is_active': True,
             'auto_approve': True,
             'chat_type': chat_type,
-            'invite_link': invite_link,
             'max_daily_approvals': 5000,
             'last_processed': None,
             'total_approved': 0
@@ -72,77 +78,59 @@ db = SimpleDB()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда начала работы с ботом"""
     user = update.effective_user
+    
+    # Создаем кнопку "Добавить канал"
+    keyboard = [
+        [KeyboardButton("📢 Добавить канал", request_chat=KeyboardButton.request_chat(
+            request_id=1,
+            chat_is_channel=True,
+            bot_is_member=True
+        ))]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
-        "🤖 Я бот для автоматического принятия заявок в ПРИВАТНЫХ Telegram-каналах\n\n"
-        "🔗 **Как добавить канал:**\n"
-        "1. Добавьте бота в канал как администратора\n"
-        "2. Скопируйте пригласительную ссылку канала\n"
-        "3. Отправьте её боту\n\n"
+        "🤖 Я бот для автоматического принятия заявок в приватных Telegram-каналах\n\n"
         "⚡ **Оптимизирован для массового принятия (3000+ заявок)**\n"
         "🚀 Скорость: 10 заявок в секунду\n\n"
-        "📋 **Команды:**\n"
-        "/list - Мои каналы\n"
-        "/turbo - Быстро принять ВСЕ заявки\n"
-        "/status - Статус обработки\n"
-        "/help - Подробная помощь\n\n"
-        "🔧 **Просто отправьте пригласительную ссылку канала чтобы начать!**"
+        "📋 **Чтобы начать:**\n"
+        "1. Нажмите кнопку '📢 Добавить канал' ниже\n"
+        "2. Выберите ваш приватный канал\n"
+        "3. Бот автоматически проверит права и добавит канал\n\n"
+        "🔧 **Требования:**\n"
+        "• Бот должен быть администратором канала\n"
+        "• Все права должны быть включены\n"
+        "• Канал должен быть приватным",
+        reply_markup=reply_markup
     )
 
-async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка пригласительных ссылок"""
+async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора канала через кнопку"""
     user_id = str(update.effective_user.id)
-    text = update.message.text
     
-    # Извлекаем пригласительную ссылку
-    invite_link = extract_invite_link(text)
-    
-    if not invite_link:
+    if not update.message.chat_shared:
         await update.message.reply_text(
-            "❌ Не удалось найти пригласительную ссылку в сообщении.\n\n"
-            "📋 **Примеры поддерживаемых форматов:**\n"
-            "• https://t.me/+QDql_IQd_7Y0NTQy\n"
-            "• @username_канала\n"
-            "• +QDql_IQd_7Y0NTQy\n\n"
-            "🔗 **Как получить ссылку:**\n"
-            "1. Зайдите в настройки канала\n"
-            "2. Нажмите 'Пригласительная ссылка'\n"
-            "3. Скопируйте ссылку и отправьте боту"
+            "❌ Не удалось получить информацию о канале.\n"
+            "Попробуйте еще раз, нажав кнопку '📢 Добавить канал'",
+            reply_markup=ReplyKeyboardRemove()
         )
         return
     
+    chat_shared = update.message.chat_shared
+    channel_id = chat_shared.chat_id
+    
     try:
-        # Проверяем, есть ли бот в канале и его права
+        # Получаем информацию о канале
         bot = context.bot
-        
-        # Пробуем получить информацию о канале
-        try:
-            chat = await bot.get_chat(invite_link)
-        except BadRequest as e:
-            if "Chat not found" in str(e):
-                await update.message.reply_text(
-                    "❌ Не удалось найти канал по этой ссылке!\n\n"
-                    "🔧 **Возможные причины:**\n"
-                    "• Бот не добавлен в канал как администратор\n"
-                    "• Неправильная пригласительная ссылка\n"
-                    "• Канал не существует\n\n"
-                    "✅ **Решение:**\n"
-                    "1. Добавьте бота в канал как администратора\n"
-                    "2. Убедитесь, что бот имеет права:\n"
-                    "   - Приглашать пользователей\n"
-                    "   - Добавлять участников\n"
-                    "   - Одобрять заявки\n"
-                    "3. Отправьте правильную пригласительную ссылку"
-                )
-                return
-            else:
-                raise e
+        chat = await bot.get_chat(channel_id)
         
         # Проверяем тип чата - должен быть каналом
         if chat.type != Chat.CHANNEL:
             await update.message.reply_text(
                 "❌ Это не канал! Бот работает только с Telegram-каналами.\n"
-                "Для групп используйте других ботов."
+                "Пожалуйста, выберите канал.",
+                reply_markup=ReplyKeyboardRemove()
             )
             return
         
@@ -150,18 +138,19 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             bot_member = await chat.get_member(bot.id)
         except BadRequest as e:
-            if "Bot is not a member" in str(e) or "Chat not found" in str(e):
+            if "Bot is not a member" in str(e):
                 await update.message.reply_text(
-                    "❌ Бот не является участником канала!\n\n"
+                    "❌ Бот не является администратором этого канала!\n\n"
                     "📋 **Чтобы добавить бота:**\n"
                     "1. Зайдите в настройки канала\n"
                     "2. Выберите 'Администраторы'\n"
                     "3. Добавьте бота как администратора\n"
-                    "4. Дайте ВСЕ права (особенно важны):\n"
+                    "4. Дайте ВСЕ права:\n"
                     "   ✓ Добавлять подписчиков\n"
                     "   ✓ Приглашать пользователей\n"
                     "   ✓ Одобрять заявки\n\n"
-                    "🔗 **После добавления отправьте ссылку снова**"
+                    "После этого нажмите кнопку '📢 Добавить канал' снова",
+                    reply_markup=ReplyKeyboardRemove()
                 )
                 return
             else:
@@ -170,14 +159,8 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not isinstance(bot_member, ChatMemberAdministrator):
             await update.message.reply_text(
                 "❌ Бот не является администратором канала!\n\n"
-                "📋 **Чтобы добавить бота:**\n"
-                "1. Зайдите в настройки канала\n"
-                "2. Выберите 'Администраторы'\n"
-                "3. Добавьте бота как администратора\n"
-                "4. Дайте ВСЕ права (особенно важны):\n"
-                "   ✓ Добавлять подписчиков\n"
-                "   ✓ Приглашать пользователей\n"
-                "   ✓ Одобрять заявки"
+                "Дайте боту права администратора и попробуйте снова.",
+                reply_markup=ReplyKeyboardRemove()
             )
             return
         
@@ -201,125 +184,109 @@ async def handle_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "2. Выберите бота\n"
                 "3. Включите ВСЕ права\n"
                 "4. Сохраните изменения\n"
-                "5. Отправьте ссылку снова"
+                "5. Нажмите кнопку '📢 Добавить канал' снова",
+                reply_markup=ReplyKeyboardRemove()
             )
             return
         
         # Проверяем, не добавлен ли уже канал
         existing_channel = db.get_channel_by_id(str(chat.id))
         if existing_channel:
+            # Создаем кнопку для принятия заявок
+            keyboard = [
+                [KeyboardButton("🚀 Принять все заявки")],
+                [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
             await update.message.reply_text(
                 f"✅ Канал '{chat.title}' уже добавлен!\n\n"
-                f"🚀 Для принятия заявок используйте:\n"
-                f"/turbo\n"
-                f"📊 Для проверки статуса:\n"
-                f"/status"
+                f"🚀 Для принятия заявок нажмите '🚀 Принять все заявки'\n"
+                f"📊 Для проверки статуса нажмите '📊 Статус'",
+                reply_markup=reply_markup
             )
             return
         
-        # Создаем новую пригласительную ссылку (для информации)
-        try:
-            if bot_member.can_invite_users:
-                new_invite = await bot.create_chat_invite_link(chat.id, creates_join_request=True)
-                final_invite_link = new_invite.invite_link
-            else:
-                final_invite_link = invite_link
-        except:
-            final_invite_link = invite_link
-        
         # Сохраняем в базу данных
-        db.add_channel(str(chat.id), chat.title, user_id, chat.type, final_invite_link)
+        db.add_channel(str(chat.id), chat.title, user_id, chat.type)
         
-        success_message = (
-            f"✅ **Канал успешно добавлен!**\n\n"
-            f"📝 **Название:** {chat.title}\n"
-            f"🔗 **Ссылка:** {final_invite_link}\n"
-            f"📊 **Статус:** 🟢 АКТИВЕН\n"
-            f"🤖 **Автопринятие:** 🟢 ВКЛЮЧЕНО\n"
-            f"⚡ **Скорость:** 10 заявок/секунду\n\n"
-        )
+        # Создаем кнопки для управления
+        keyboard = [
+            [KeyboardButton("🚀 Принять все заявки")],
+            [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
         # Получаем текущие заявки для информации
         try:
             join_requests = await bot.get_chat_join_requests(chat.id)
             pending_count = len(list(join_requests))
-            success_message += f"⏳ **Ожидающих заявок:** {pending_count}\n\n"
         except Exception as e:
             logger.warning(f"Could not get join requests: {e}")
             pending_count = 0
         
-        success_message += (
-            "🚀 **Для массового принятия заявок:**\n"
-            "/turbo\n\n"
-            "📈 **Для проверки статуса:**\n"
-            "/status"
+        success_message = (
+            f"✅ **Канал успешно добавлен!**\n\n"
+            f"📝 **Название:** {chat.title}\n"
+            f"📊 **Статус:** 🟢 АКТИВЕН\n"
+            f"🤖 **Автопринятие:** 🟢 ВКЛЮЧЕНО\n"
+            f"⚡ **Скорость:** 10 заявок/секунду\n"
+            f"⏳ **Ожидающих заявок:** {pending_count}\n\n"
+            f"🚀 **Для принятия заявок нажмите '🚀 Принять все заявки'**\n"
+            f"📊 **Для проверки статуса нажмите '📊 Статус'**"
         )
         
-        await update.message.reply_text(success_message)
+        await update.message.reply_text(success_message, reply_markup=reply_markup)
         
-    except BadRequest as e:
-        error_msg = str(e).lower()
-        if "chat not found" in error_msg:
-            await update.message.reply_text(
-                "❌ Канал не найден или бот не добавлен как администратор!\n\n"
-                "🔧 **Убедитесь, что:**\n"
-                "1. Канал существует\n"
-                "2. Бот добавлен как администратор\n"
-                "3. У бота есть ВСЕ необходимые права\n"
-                "4. Вы используете правильную пригласительную ссылку\n\n"
-                "✅ **После исправления отправьте ссылку снова**"
-            )
-        elif "not enough rights" in error_msg:
-            await update.message.reply_text(
-                "❌ Недостаточно прав! Дайте боту ВСЕ права администратора.\n\n"
-                "📋 **Необходимые права:**\n"
-                "• Приглашать пользователей\n"
-                "• Добавлять участников\n"
-                "• Одобрять заявки\n"
-                "• Ограничивать участников"
-            )
-        elif "invite link invalid" in error_msg:
-            await update.message.reply_text(
-                "❌ Недействительная пригласительная ссылка!\n\n"
-                "🔗 **Получите новую ссылку:**\n"
-                "1. Зайдите в настройки канала\n"
-                "2. Нажмите 'Пригласительная ссылка'\n"
-                "3. Создайте новую ссылку и отправьте боту"
-            )
-        else:
-            await update.message.reply_text(f"❌ Ошибка: {e}")
     except Exception as e:
         logger.error(f"Error adding channel: {e}")
         await update.message.reply_text(
-            "❌ Произошла неизвестная ошибка при добавлении канала\n\n"
-            "🔧 **Попробуйте:**\n"
-            "1. Перезагрузить бота командой /start\n"
-            "2. Отправить ссылку еще раз\n"
-            "3. Проверить права бота в канале"
+            "❌ Произошла ошибка при добавлении канала\n\n"
+            "Попробуйте еще раз или проверьте права бота в канале.",
+            reply_markup=ReplyKeyboardRemove()
         )
 
-def extract_invite_link(text):
-    """Извлекает пригласительную ссылку из текста"""
-    # Паттерны для пригласительных ссылок
-    patterns = [
-        r'https?://t\.me/\+[\w-]+',
-        r'https?://telegram\.me/\+[\w-]+',
-        r'@[\w-]+',
-        r'\+[\w-]+'
-    ]
+async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки"""
+    user_id = str(update.effective_user.id)
+    text = update.message.text
     
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            link = matches[0]
-            # Если это не полная ссылка, преобразуем в полную
-            if link.startswith('+'):
-                return f"https://t.me/{link}"
-            elif link.startswith('@'):
-                return f"https://t.me/{link[1:]}"
-            return link
-    
-    return None
+    if text == "📢 Добавить канал":
+        # Показываем кнопку для добавления канала
+        keyboard = [
+            [KeyboardButton("📢 Добавить канал", request_chat=KeyboardButton.request_chat(
+                request_id=1,
+                chat_is_channel=True,
+                bot_is_member=True
+            ))]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text(
+            "Выберите канал из списка:",
+            reply_markup=reply_markup
+        )
+        
+    elif text == "🚀 Принять все заявки":
+        await turbo_approve(update, context)
+        
+    elif text == "📊 Статус":
+        await status_command(update, context)
+        
+    elif text == "📋 Мои каналы":
+        await list_channels(update, context)
+        
+    else:
+        # Если сообщение не распознано, показываем главное меню
+        keyboard = [
+            [KeyboardButton("📢 Добавить канал")],
+            [KeyboardButton("🚀 Принять все заявки")],
+            [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            "Выберите действие:",
+            reply_markup=reply_markup
+        )
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Список каналов пользователя"""
@@ -328,24 +295,33 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_channels = db.get_user_channels(user_id)
     
     if not user_channels:
+        keyboard = [
+            [KeyboardButton("📢 Добавить канал")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
         await update.message.reply_text(
             "❌ У вас нет добавленных каналов\n\n"
-            "🔗 **Чтобы добавить канал:**\n"
-            "1. Добавьте бота в канал как администратора\n"
-            "2. Отправьте пригласительную ссылку боту"
+            "Нажмите '📢 Добавить канал' чтобы начать",
+            reply_markup=reply_markup
         )
         return
     
-    channels_text = "📋 **Ваши приватные каналы:**\n\n"
+    channels_text = "📋 **Ваши каналы:**\n\n"
     for i, channel in enumerate(user_channels, 1):
         status = "🟢" if channel['is_active'] else "🔴"
         approved = channel.get('total_approved', 0)
         channels_text += f"{status} **{i}. {channel['channel_title']}**\n"
-        channels_text += f"   🔗 {channel['invite_link']}\n"
         channels_text += f"   ✅ Принято: {approved} заявок\n\n"
     
-    channels_text += "🚀 **Для массового принятия:** /turbo"
-    await update.message.reply_text(channels_text)
+    # Добавляем кнопки управления
+    keyboard = [
+        [KeyboardButton("🚀 Принять все заявки")],
+        [KeyboardButton("📊 Статус"), KeyboardButton("📢 Добавить канал")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(channels_text, reply_markup=reply_markup)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статус обработки канала"""
@@ -354,24 +330,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_channels = db.get_user_channels(user_id)
     
     if not user_channels:
+        keyboard = [
+            [KeyboardButton("📢 Добавить канал")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
         await update.message.reply_text(
             "❌ У вас нет добавленных каналов\n\n"
-            "🔗 Отправьте пригласительную ссылку канала чтобы начать"
+            "Нажмите '📢 Добавить канал' чтобы начать",
+            reply_markup=reply_markup
         )
         return
     
-    # Если несколько каналов, показываем список
-    if len(user_channels) > 1:
-        channels_text = "📋 **Выберите канал для проверки статуса:**\n\n"
-        for i, channel in enumerate(user_channels, 1):
-            status = "🟢" if channel['is_active'] else "🔴"
-            channels_text += f"{status} **{i}. {channel['channel_title']}**\n"
-        
-        channels_text += "\n🔗 **Или отправьте пригласительную ссылку канала**"
-        await update.message.reply_text(channels_text)
-        return
-    
-    # Если один канал, показываем его статус
+    # Используем первый канал (можно расширить для выбора)
     channel = user_channels[0]
     
     try:
@@ -398,11 +369,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 status_text += f"⏱ **Примерное время обработки:** {estimated_time:.1f} секунд\n"
             
-            status_text += f"🚀 **Для запуска:** /turbo"
+            status_text += f"🚀 **Для запуска нажмите '🚀 Принять все заявки'**"
         else:
             status_text += "🎉 **Нет ожидающих заявок!**"
         
-        await update.message.reply_text(status_text)
+        # Кнопки управления
+        keyboard = [
+            [KeyboardButton("🚀 Принять все заявки")],
+            [KeyboardButton("📋 Мои каналы"), KeyboardButton("📢 Добавить канал")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        await update.message.reply_text(status_text, reply_markup=reply_markup)
         
     except Exception as e:
         logger.error(f"Error getting status: {e}")
@@ -415,21 +393,19 @@ async def turbo_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_channels = db.get_user_channels(user_id)
     
     if not user_channels:
+        keyboard = [
+            [KeyboardButton("📢 Добавить канал")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
         await update.message.reply_text(
             "❌ У вас нет добавленных каналов\n\n"
-            "🔗 Отправьте пригласительную ссылку канала чтобы начать"
+            "Нажмите '📢 Добавить канал' чтобы начать",
+            reply_markup=reply_markup
         )
         return
     
-    # Если несколько каналов, используем первый
-    if len(user_channels) > 1:
-        await update.message.reply_text(
-            "🔗 **Обнаружено несколько каналов.**\n\n"
-            "🚀 Запускаю TURBO-режим для первого канала:\n"
-            f"**{user_channels[0]['channel_title']}**\n\n"
-            "📋 Чтобы выбрать другой канал, используйте /list"
-        )
-    
+    # Используем первый канал
     channel = user_channels[0]
     
     try:
@@ -442,7 +418,15 @@ async def turbo_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(requests_list)
         
         if total == 0:
-            await update.message.reply_text("🎉 **Нет заявок для принятия!**")
+            keyboard = [
+                [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
+            await update.message.reply_text(
+                "🎉 **Нет заявок для принятия!**",
+                reply_markup=reply_markup
+            )
             return
         
         # Расчет времени
@@ -535,7 +519,15 @@ async def turbo_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             result_message += "⚠️ **Некоторые заявки не удалось обработать**"
         
+        # Кнопки после завершения
+        keyboard = [
+            [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")],
+            [KeyboardButton("📢 Добавить канал")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
         await message.edit_text(result_message)
+        await update.message.reply_text("Выберите следующее действие:", reply_markup=reply_markup)
         
     except Exception as e:
         logger.error(f"Error in turbo mode: {e}")
@@ -590,16 +582,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⚡ **Оптимизирован для 3000+ заявок**
 
 **🔗 КАК НАЧАТЬ:**
-1. Добавьте бота в канал как администратора
-2. Дайте ВСЕ права администратора
-3. Отправьте боту пригласительную ссылку канала
+1. Нажмите "📢 Добавить канал"
+2. Выберите ваш канал из списка
+3. Бот автоматически проверит права и добавит канал
 
-**📋 КОМАНДЫ:**
-/start - Начать работу
-/list - Мои каналы  
-/turbo - Быстро принять ВСЕ заявки
-/status - Статус обработки
-/help - Эта справка
+**📋 КНОПКИ УПРАВЛЕНИЯ:**
+📢 Добавить канал - Выбрать канал для работы
+🚀 Принять все заявки - Быстро принять ВСЕ заявки
+📊 Статус - Проверить статус обработки
+📋 Мои каналы - Список ваших каналов
 
 **🔧 НАСТРОЙКА ПРАВ БОТА:**
 В настройках канала дайте боту ВСЕ права:
@@ -614,18 +605,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - Автоматическое возобновление
 - Защита от ограничений Telegram
 
-**📊 ПРИМЕР ДЛЯ 3200 ЗАЯВОК:**
-⏱ Время: ~5.5 минут
-⚡ Скорость: 10/сек
-✅ Результат: 3200 принятых заявок
-
-**🚀 ИСПОЛЬЗОВАНИЕ:**
-1. Добавить бота в канал → Отправить ссылку
-2. /turbo
-3. Ждем 5-6 минут
+**🚀 ДЛЯ 3200 ЗАЯВОК:**
+1. Нажмите "📢 Добавить канал" и выберите канал
+2. Нажмите "🚀 Принять все заявки"
+3. Ждем ~5.5 минут
 4. Готово!
     """
-    await update.message.reply_text(help_text)
+    
+    # Главное меню
+    keyboard = [
+        [KeyboardButton("📢 Добавить канал")],
+        [KeyboardButton("🚀 Принять все заявки")],
+        [KeyboardButton("📊 Статус"), KeyboardButton("📋 Мои каналы")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(help_text, reply_markup=reply_markup)
 
 async def process_join_requests(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая обработка новых заявок"""
@@ -691,13 +686,16 @@ def main():
     
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("list", list_channels))
-    application.add_handler(CommandHandler("turbo", turbo_approve))
-    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list", list_channels))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("turbo", turbo_approve))
     
-    # Обработчик пригласительных ссылок
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_invite_link))
+    # Обработчик выбора канала через кнопку
+    application.add_handler(MessageHandler(filters.CHAT_SHARED, handle_chat_shared))
+    
+    # Обработчик нажатий на кнопки
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button_actions))
     
     # Настраиваем планировщик для фоновой обработки
     scheduler = AsyncIOScheduler()
