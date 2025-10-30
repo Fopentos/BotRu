@@ -212,9 +212,11 @@ async def handle_forwarded_message(message: types.Message, state: FSMContext):
         # Получаем количество ожидающих заявок
         pending_count = 0
         try:
-            join_requests = await bot.get_chat_join_requests(forwarded_chat.id)
-            async for _ in join_requests:
-                pending_count += 1
+            # В aiogram 3.x используем правильный метод
+            from aiogram.methods import GetChatJoinRequests
+            result = await bot(GetChatJoinRequests(chat_id=forwarded_chat.id))
+            if hasattr(result, 'join_requests'):
+                pending_count = len(result.join_requests)
         except Exception as e:
             logger.warning(f"Could not get join requests: {e}")
         
@@ -276,9 +278,13 @@ async def channel_status(message: types.Message):
     try:
         # Получаем текущие заявки
         pending_count = 0
-        join_requests = await bot.get_chat_join_requests(int(channel['channel_id']))
-        async for _ in join_requests:
-            pending_count += 1
+        try:
+            from aiogram.methods import GetChatJoinRequests
+            result = await bot(GetChatJoinRequests(chat_id=int(channel['channel_id'])))
+            if hasattr(result, 'join_requests'):
+                pending_count = len(result.join_requests)
+        except Exception as e:
+            logger.warning(f"Could not get join requests: {e}")
         
         total_approved = channel.get('total_approved', 0)
         
@@ -327,16 +333,15 @@ async def turbo_approve(message: types.Message):
     
     try:
         # Получаем все заявки
-        join_requests = await bot.get_chat_join_requests(channel_id)
-        requests_list = []
-        async for request in join_requests:
-            requests_list.append(request)
+        from aiogram.methods import GetChatJoinRequests
+        result = await bot(GetChatJoinRequests(chat_id=channel_id))
         
-        total = len(requests_list)
-        
-        if total == 0:
+        if not hasattr(result, 'join_requests') or not result.join_requests:
             await message.answer("🎉 <b>Нет заявок для принятия!</b>")
             return
+        
+        requests_list = result.join_requests
+        total = len(requests_list)
         
         # Запускаем процесс принятия
         status_msg = await message.answer(
@@ -351,11 +356,12 @@ async def turbo_approve(message: types.Message):
         
         for i, request in enumerate(requests_list):
             try:
-                # Принимаем заявку
-                await bot.approve_chat_join_request(
+                # Принимаем заявку через правильный метод
+                from aiogram.methods import ApproveChatJoinRequest
+                await bot(ApproveChatJoinRequest(
                     chat_id=channel_id,
                     user_id=request.user.id
-                )
+                ))
                 approved += 1
                 db.increment_approved(channel['channel_id'])
                 
@@ -398,14 +404,13 @@ async def process_pending_requests():
             continue
             
         try:
-            join_requests = await bot.get_chat_join_requests(int(channel_id))
-            requests_list = []
-            async for request in join_requests:
-                requests_list.append(request)
+            from aiogram.methods import GetChatJoinRequests
+            result = await bot(GetChatJoinRequests(chat_id=int(channel_id)))
             
-            if not requests_list:
+            if not hasattr(result, 'join_requests') or not result.join_requests:
                 continue
             
+            requests_list = result.join_requests
             logger.info(f"🔄 Processing {len(requests_list)} requests for {channel['title']}")
             
             approved = 0
@@ -414,10 +419,11 @@ async def process_pending_requests():
                     continue
                     
                 try:
-                    await bot.approve_chat_join_request(
+                    from aiogram.methods import ApproveChatJoinRequest
+                    await bot(ApproveChatJoinRequest(
                         chat_id=int(channel_id),
                         user_id=request.user.id
-                    )
+                    ))
                     approved += 1
                     db.increment_approved(channel_id)
                     db.mark_user_processed(channel_id, request.user.id)
