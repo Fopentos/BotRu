@@ -280,6 +280,33 @@ async def get_user_stats(user_id):
         logger.error(f"Ошибка получения статистики: {e}")
         return {'scans_count': 0, 'adds_count': 0, 'total_added': 0}
 
+async def update_user_stats(user_id, field):
+    """Обновляем статистику пользователя"""
+    try:
+        pool = await create_pool()
+        async with pool.acquire() as conn:
+            if field == 'scans_count':
+                await conn.execute('''
+                    INSERT INTO user_stats (user_id, scans_count, last_scan)
+                    VALUES ($1, 1, $2)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET 
+                        scans_count = user_stats.scans_count + 1,
+                        last_scan = $2
+                ''', user_id, datetime.now())
+            elif field == 'adds_count':
+                await conn.execute('''
+                    INSERT INTO user_stats (user_id, adds_count, last_add)
+                    VALUES ($1, 1, $2)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET 
+                        adds_count = user_stats.adds_count + 1,
+                        last_add = $2
+                ''', user_id, datetime.now())
+        await pool.close()
+    except Exception as e:
+        logger.error(f"Ошибка обновления статистики: {e}")
+
 # Обработчики команд для python-telegram-bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -323,52 +350,155 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    logger.info(f"Обрабатываю callback: {query.data} от пользователя {user_id}")
     
-    if query.data == "quick_auth":
-        await query.edit_message_text(
-            "🔐 **Быстрая авторизация**\n\n"
-            "📱 Отправь мне свой номер телефона в международном формате:\n\n"
-            "**Пример:** `+79123456789`\n\n"
-            "⚠️ *Используй только свой номер телефона*",
-            parse_mode='Markdown'
-        )
-        user_states[user_id] = 'waiting_phone'
+    try:
+        if query.data == "quick_auth":
+            await query.edit_message_text(
+                "🔐 **Быстрая авторизация**\n\n"
+                "📱 Отправь мне свой номер телефона в международном формате:\n\n"
+                "**Пример:** `+79123456789`\n\n"
+                "⚠️ *Используй только свой номер телефона*",
+                parse_mode='Markdown'
+            )
+            user_states[user_id] = 'waiting_phone'
+        
+        elif query.data == "manual_guide":
+            await query.edit_message_text(
+                "📖 **Инструкция по использованию**\n\n"
+                "1. **Авторизация:** Отправь номер телефона для получения API ключей\n"
+                "2. **Сканирование:** Укажи чат для поиска пользователей\n"
+                "3. **Добавление:** Выбери целевую группу для добавления\n\n"
+                "⚡ Все процессы автоматизированы!",
+                parse_mode='Markdown'
+            )
+        
+        elif query.data == "scan_chat":
+            await query.edit_message_text(
+                "🔍 **Сканирование чата**\n\n"
+                "Функция в разработке...\n\n"
+                "Скоро здесь можно будет сканировать чаты для поиска пользователей!",
+                parse_mode='Markdown'
+            )
+        
+        elif query.data == "add_users":
+            await query.edit_message_text(
+                "🚀 **Добавление пользователей**\n\n"
+                "Функция в разработке...\n\n"
+                "Скоро здесь можно будет массово добавлять пользователей в группы!",
+                parse_mode='Markdown'
+            )
+        
+        elif query.data == "stats":
+            user_id = query.from_user.id
+            stats = await get_user_stats(user_id)
+            await query.edit_message_text(
+                f"📊 **Твоя статистика**\n\n"
+                f"🔍 Сканирований: **{stats['scans_count']}**\n"
+                f"🚀 Операций добавления: **{stats['adds_count']}**\n"
+                f"👥 Всего добавлено: **{stats['total_added']}**\n\n"
+                f"⚡ Продолжаем в том же духе!",
+                parse_mode='Markdown'
+            )
+        
+        elif query.data == "main_menu":
+            user_data_obj = await get_user_data(user_id)
+            if user_data_obj and user_data_obj.get('api_id'):
+                stats = await get_user_stats(user_id)
+                keyboard = [
+                    [InlineKeyboardButton("🔍 Сканировать чат", callback_data="scan_chat"),
+                     InlineKeyboardButton("🚀 Добавить", callback_data="add_users")],
+                    [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+                     InlineKeyboardButton("⚙️ Настройки", callback_data="settings")],
+                    [InlineKeyboardButton("🆘 Помощь", callback_data="help"),
+                     InlineKeyboardButton("🔄 Переавторизация", callback_data="reauth")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    f"🤖 **Главное меню**\n\n"
+                    f"✅ Авторизован: `{user_data_obj['phone']}`\n"
+                    f"📊 Сканирований: `{stats.get('scans_count', 0)}`\n"
+                    f"👥 Добавлено: `{stats.get('total_added', 0)}`\n\n"
+                    f"Выбери действие:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                keyboard = [
+                    [InlineKeyboardButton("🔐 Быстрая авторизация", callback_data="quick_auth")],
+                    [InlineKeyboardButton("📖 Инструкция", callback_data="manual_guide")],
+                    [InlineKeyboardButton("💬 Поддержка", url="https://t.me/zeta_support")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    "👋 **Добро пожаловать в Zeta Mass Adder!**\n\n"
+                    "🤖 *Умный бот для роста Telegram-сообществ*\n\n"
+                    "🎯 **Для начала работы:**\n"
+                    "1. 🔐 Авторизуйся через номер телефона\n"
+                    "2. 🔍 Выбери чат для сканирования\n"
+                    "3. 🚀 Добавь пользователей в свою группу\n\n"
+                    "⚡ **Бот автоматически получит твои API ключи!**",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+        
+        elif query.data == "settings":
+            await query.edit_message_text(
+                "⚙️ **Настройки**\n\n"
+                "🔧 *Раздел в разработке*\n\n"
+                "Скоро здесь можно будет настроить:\n"
+                "• Лимиты сканирования\n"
+                "• Лимиты добавления\n"
+                "• Задержки между действиями\n"
+                "• Автоматизацию процессов",
+                parse_mode='Markdown'
+            )
+        
+        elif query.data == "help":
+            await query.edit_message_text(
+                "🆘 **Помощь по боту Zeta Mass Adder**\n\n"
+                "🔐 **Авторизация:**\n"
+                "• Используй быструю авторизацию через номер телефона\n"
+                "• Бот автоматически получит твои API ключи\n"
+                "• Все данные хранятся безопасно\n\n"
+                "🔍 **Сканирование чатов:**\n"
+                "• Отправь ссылку на любой чат/канал\n"
+                "• Бот найдет пользователей которых можно добавить\n"
+                "• Настраивай лимиты сканирования\n\n"
+                "🚀 **Добавление пользователей:**\n"
+                "• Выбери целевую группу\n"
+                "• Бот массово добавит найденных пользователей\n"
+                "• Автоматическая задержка между добавлениями\n\n"
+                "💬 **Поддержка:**\n"
+                "@zeta_support - помощь и вопросы",
+                parse_mode='Markdown'
+            )
+        
+        elif query.data == "reauth":
+            # Удаляем старые данные
+            pool = await create_pool()
+            async with pool.acquire() as conn:
+                await conn.execute('DELETE FROM users WHERE user_id = $1', user_id)
+                await conn.execute('DELETE FROM auth_sessions WHERE user_id = $1', user_id)
+                await conn.execute('DELETE FROM user_stats WHERE user_id = $1', user_id)
+            await pool.close()
+            
+            user_states.pop(user_id, None)
+            user_data.pop(user_id, None)
+            
+            await query.edit_message_text(
+                "🔄 **Все данные удалены!**\n\n"
+                "Теперь можешь пройти авторизацию заново через /start\n\n"
+                "⚡ *Бот сгенерирует для тебя новые API ключи*",
+                parse_mode='Markdown'
+            )
     
-    elif query.data == "manual_guide":
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике кнопок: {e}")
         await query.edit_message_text(
-            "📖 **Инструкция по использованию**\n\n"
-            "1. **Авторизация:** Отправь номер телефона для получения API ключей\n"
-            "2. **Сканирование:** Укажи чат для поиска пользователей\n"
-            "3. **Добавление:** Выбери целевую группу для добавления\n\n"
-            "⚡ Все процессы автоматизированы!",
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "scan_chat":
-        await query.edit_message_text(
-            "🔍 **Сканирование чата**\n\n"
-            "Функция в разработке...\n\n"
-            "Скоро здесь можно будет сканировать чаты для поиска пользователей!",
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "add_users":
-        await query.edit_message_text(
-            "🚀 **Добавление пользователей**\n\n"
-            "Функция в разработке...\n\n"
-            "Скоро здесь можно будет массово добавлять пользователей в группы!",
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "stats":
-        user_id = query.from_user.id
-        stats = await get_user_stats(user_id)
-        await query.edit_message_text(
-            f"📊 **Твоя статистика**\n\n"
-            f"🔍 Сканирований: **{stats['scans_count']}**\n"
-            f"🚀 Операций добавления: **{stats['adds_count']}**\n"
-            f"👥 Всего добавлено: **{stats['total_added']}**\n\n"
-            f"⚡ Продолжаем в том же духе!",
+            "❌ Произошла ошибка при обработке запроса. Попробуйте еще раз.",
             parse_mode='Markdown'
         )
 
@@ -379,6 +509,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if not state:
+        # Если нет состояния, просто игнорируем
         return
         
     if state == 'waiting_phone':
@@ -420,7 +551,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [InlineKeyboardButton("🔍 Сканировать чат", callback_data="scan_chat")],
                 [InlineKeyboardButton("🚀 Добавить пользователей", callback_data="add_users")],
-                [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+                [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -461,7 +593,7 @@ async def main():
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики
+    # Добавляем обработчики в ПРАВИЛЬНОМ порядке
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
