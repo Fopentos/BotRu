@@ -7,7 +7,7 @@ from datetime import datetime
 from collections import defaultdict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # 🔧 КОНФИГУРАЦИЯ
 BOT_TOKEN = "8295619077:AAH05zqWTC8Kv11dLJyaMlSWlXEJtmU_Too"
@@ -18,7 +18,7 @@ ROCKET_CONFIG = {
     "min_bet": 1,
     "max_bet": 100000,
     "multiplier_step": 0.01,
-    "time_step": 0.2,  # секунды между обновлениями
+    "time_step": 0.05,  # УВЕЛИЧЕНА СКОРОСТЬ: 0.05 секунды между обновлениями
     "max_multiplier": 10000,
     "instant_explosion_chance": 0.01,  # 1% шанс мгновенного взрыва
     "base_explosion_chance": 0.005,    # Базовый шанс взрыва
@@ -43,6 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 # 🚀 ФУНКЦИИ ИГРЫ "РАКЕТА"
 def calculate_explosion_chance(current_multiplier):
@@ -51,20 +52,35 @@ def calculate_explosion_chance(current_multiplier):
     growth = ROCKET_CONFIG['chance_growth'] * current_multiplier
     return min(base_chance + growth, 0.5)  # Максимум 50% шанс
 
+def create_progress_bar(multiplier, length=20):
+    """Создает визуальный прогресс-бар"""
+    progress = min(multiplier / ROCKET_CONFIG['max_multiplier'], 1.0)
+    filled = int(length * progress)
+    bar = "▰" * filled + "▱" * (length - filled)
+    return f"[{bar}] {progress*100:.1f}%"
+
 async def rocket_game_task(user_id, bet_amount, message, context):
     """Асинхронная задача для игры в ракету"""
     try:
         # Проверка мгновенного взрыва
         if random.random() < ROCKET_CONFIG['instant_explosion_chance']:
-            await message.edit_text(
-                "💥 РАКЕТА ВЗОРВАЛАСЬ СРАЗУ!\n"
+            explosion_text = (
+                "💥 РАКЕТА ВЗОРВАЛАСЬ СРАЗУ!\n\n"
                 f"💰 Вы потеряли: {bet_amount} ⭐\n"
-                f"📈 Множитель: 1.00x",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🎮 Играть снова", callback_data="play_rocket"),
-                    InlineKeyboardButton("📊 Профиль", callback_data="profile")
-                ]])
+                f"📈 Множитель: 1.00x\n\n"
+                "Ракета может взорваться на любом множителе!"
             )
+            
+            keyboard = [
+                [InlineKeyboardButton("🎮 Играть снова", callback_data="play_rocket")],
+                [InlineKeyboardButton("📊 Профиль", callback_data="profile")]
+            ]
+            
+            await message.edit_text(
+                explosion_text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
             user_data[user_id]['total_games'] += 1
             user_data[user_id]['total_wagered'] += bet_amount
             if user_id in active_games:
@@ -78,20 +94,31 @@ async def rocket_game_task(user_id, bet_amount, message, context):
             if user_id not in active_games:
                 return  # Игра была отменена
             
+            # Обновляем множитель в активной игре
+            active_games[user_id]['current_multiplier'] = multiplier
+            
             # Проверяем взрыв
             explosion_chance = calculate_explosion_chance(multiplier)
             if random.random() < explosion_chance:
-                # ВЗРЫВ
-                await message.edit_text(
-                    f"💥 РАКЕТА ВЗОРВАЛАСЬ!\n"
+                # ВЗРЫВ - ДОБАВЛЕНО СООБЩЕНИЕ О ВЗРЫВЕ НА ЛЮБОМ МНОЖИТЕЛЕ
+                explosion_text = (
+                    f"💥 РАКЕТА ВЗОРВАЛАСЬ НА {multiplier:.2f}x!\n\n"
                     f"💰 Вы потеряли: {bet_amount} ⭐\n"
                     f"📈 Достигнут множитель: {multiplier:.2f}x\n"
-                    f"🎯 Шанс взрыва был: {explosion_chance*100:.1f}%",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🎮 Играть снова", callback_data="play_rocket"),
-                        InlineKeyboardButton("📊 Профиль", callback_data="profile")
-                    ]])
+                    f"🎯 Шанс взрыва был: {explosion_chance*100:.1f}%\n\n"
+                    "💡 Ракета может взорваться на любом множителе!"
                 )
+                
+                keyboard = [
+                    [InlineKeyboardButton("🎮 Играть снова", callback_data="play_rocket")],
+                    [InlineKeyboardButton("📊 Профиль", callback_data="profile")]
+                ]
+                
+                await message.edit_text(
+                    explosion_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                
                 user_data[user_id]['total_games'] += 1
                 user_data[user_id]['total_wagered'] += bet_amount
                 if user_id in active_games:
@@ -116,11 +143,11 @@ async def rocket_game_task(user_id, bet_amount, message, context):
                     f"📈 Множитель: {multiplier:.2f}x\n"
                     f"💰 Выигрыш: {potential_win:.0f} ⭐\n"
                     f"⏰ Время: {time_elapsed:.1f} сек\n"
-                    f"🎯 Шанс взрыва: {explosion_chance*100:.1f}%",
+                    f"🎯 Шанс взрыва: {explosion_chance*100:.2f}%",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception as e:
-                logging.error(f"Ошибка редактирования сообщения: {e}")
+                logger.error(f"Ошибка редактирования сообщения: {e}")
                 if user_id in active_games:
                     del active_games[user_id]
                 return
@@ -138,7 +165,7 @@ async def rocket_game_task(user_id, bet_amount, message, context):
         user_data[user_id]['max_multiplier'] = max(user_data[user_id]['max_multiplier'], ROCKET_CONFIG['max_multiplier'])
         
         await message.edit_text(
-            f"🎉 МАКСИМАЛЬНЫЙ МНОЖИТЕЛЬ ДОСТИГНУТ!\n"
+            f"🎉 МАКСИМАЛЬНЫЙ МНОЖИТЕЛЬ ДОСТИГНУТ!\n\n"
             f"💰 Ваш выигрыш: {win_amount:.0f} ⭐\n"
             f"📈 Множитель: {ROCKET_CONFIG['max_multiplier']}x\n"
             f"💎 Новый баланс: {user_data[user_id]['balance']:.0f} ⭐",
@@ -148,17 +175,13 @@ async def rocket_game_task(user_id, bet_amount, message, context):
             ]])
         )
         
-    except Exception as e:
-        logging.error(f"Ошибка в игре: {e}")
         if user_id in active_games:
             del active_games[user_id]
-
-def create_progress_bar(multiplier, length=20):
-    """Создает визуальный прогресс-бар"""
-    progress = min(multiplier / ROCKET_CONFIG['max_multiplier'], 1.0)
-    filled = int(length * progress)
-    bar = "▰" * filled + "▱" * (length - filled)
-    return f"[{bar}] {progress*100:.1f}%"
+        
+    except Exception as e:
+        logger.error(f"Ошибка в игре: {e}")
+        if user_id in active_games:
+            del active_games[user_id]
 
 # 👤 КОМАНДЫ ПОЛЬЗОВАТЕЛЯ
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,7 +208,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    
+    if update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    else:
+        await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup)
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -299,18 +326,18 @@ async def start_rocket_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if update.callback_query:
         message = await update.callback_query.edit_message_text(
-            "🚀 ПОДГОТОВКА РАКЕТЫ...\n\n"
-            "💰 Ставка: {bet_amount} ⭐\n"
-            "📈 Множитель: 1.00x\n"
-            "⏰ Ожидание старта...".format(bet_amount=bet_amount),
+            f"🚀 ПОДГОТОВКА РАКЕТЫ...\n\n"
+            f"💰 Ставка: {bet_amount} ⭐\n"
+            f"📈 Множитель: 1.00x\n"
+            f"⏰ Ожидание старта...",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
         message = await update.message.reply_text(
-            "🚀 ПОДГОТОВКА РАКЕТЫ...\n\n"
-            "💰 Ставка: {bet_amount} ⭐\n"
-            "📈 Множитель: 1.00x\n"
-            "⏰ Ожидание старта...".format(bet_amount=bet_amount),
+            f"🚀 ПОДГОТОВКА РАКЕТЫ...\n\n"
+            f"💰 Ставка: {bet_amount} ⭐\n"
+            f"📈 Множитель: 1.00x\n"
+            f"⏰ Ожидание старта...",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
@@ -318,7 +345,8 @@ async def start_rocket_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_games[user_id] = {
         'bet_amount': bet_amount,
         'message_id': message.message_id,
-        'chat_id': message.chat_id
+        'chat_id': message.chat_id,
+        'current_multiplier': 1.00
     }
     
     # Запускаем асинхронную задачу
@@ -331,17 +359,11 @@ async def cashout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     if user_id not in active_games:
-        await query.answer("Игра не найдена!", show_alert=True)
+        await query.answer("Игра не найдена или уже завершена!", show_alert=True)
         return
     
-    # Находим текущий множитель из текста сообщения
-    try:
-        message_text = query.message.text
-        multiplier_line = [line for line in message_text.split('\n') if 'Множитель:' in line][0]
-        multiplier = float(multiplier_line.split(':')[1].replace('x', '').strip())
-    except:
-        multiplier = 1.0
-    
+    # Получаем текущий множитель из активной игры
+    multiplier = active_games[user_id].get('current_multiplier', 1.0)
     bet_amount = active_games[user_id]['bet_amount']
     win_amount = bet_amount * multiplier
     
@@ -414,14 +436,14 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     keyboard = [
+        [InlineKeyboardButton("➕ Пополнить баланс", callback_data="admin_add_balance")],
         [InlineKeyboardButton("📊 Общая статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users")],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ]
     
     await query.edit_message_text(admin_text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def add_balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
@@ -446,6 +468,27 @@ async def add_balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     except ValueError:
         await update.message.reply_text("❌ Неверный формат данных!")
 
+async def admin_add_balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await query.answer("Доступ запрещен!", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "➕ ПОПОЛНЕНИЕ БАЛАНСА\n\n"
+        "Используйте команду:\n"
+        "/addbalance <user_id> <amount>\n\n"
+        "Пример:\n"
+        "/addbalance 123456789 1000",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+        ]])
+    )
+
 # 🔄 CALLBACK ОБРАБОТЧИКИ
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -466,10 +509,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔙 Назад", callback_data="profile")
             ]])
         )
-    elif callback_data == "cashout":
-        await cashout_handler(update, context)
-    elif callback_data == "stop_game":
-        await stop_game_handler(update, context)
     elif callback_data == "admin_panel":
         await admin_panel(update, context)
     elif callback_data == "admin_stats":
@@ -479,6 +518,8 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
             ]])
         )
+    elif callback_data == "admin_add_balance":
+        await admin_add_balance_handler(update, context)
 
 # 🚀 ЗАПУСК БОТА
 def main():
@@ -489,14 +530,19 @@ def main():
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("bet", bet_command))
     application.add_handler(CommandHandler("rocket", rocket_command))
-    
-    # Админ команды
-    application.add_handler(CommandHandler("addbalance", add_balance_handler))
+    application.add_handler(CommandHandler("addbalance", add_balance_command))
     
     # Обработчики callback
     application.add_handler(CallbackQueryHandler(handle_callbacks))
     
+    # Обработчики для кнопок игры (ВАЖНО: регистрируем отдельно)
+    application.add_handler(CallbackQueryHandler(cashout_handler, pattern="^cashout$"))
+    application.add_handler(CallbackQueryHandler(stop_game_handler, pattern="^stop_game$"))
+    
     print("🚀 Rocket Casino Bot запущен!")
+    print(f"⚡ Скорость игры: {ROCKET_CONFIG['time_step']} сек")
+    print(f"📈 Максимальный множитель: {ROCKET_CONFIG['max_multiplier']}x")
+    
     application.run_polling()
 
 if __name__ == "__main__":
