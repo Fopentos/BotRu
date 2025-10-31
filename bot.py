@@ -3,6 +3,7 @@ import json
 import random
 import asyncio
 import logging
+import math
 from datetime import datetime
 from collections import defaultdict
 
@@ -18,11 +19,9 @@ ROCKET_CONFIG = {
     "min_bet": 1,
     "max_bet": 100000,
     "multiplier_step": 0.01,
-    "time_step": 0.05,  # УВЕЛИЧЕНА СКОРОСТЬ: 0.05 секунды между обновлениями
+    "time_step": 0.1,  # УМЕНЬШЕНА СКОРОСТЬ: 0.1 секунды между обновлениями
     "max_multiplier": 10000,
-    "instant_explosion_chance": 0.01,  # 1% шанс мгновенного взрыва
-    "base_explosion_chance": 0.005,    # Базовый шанс взрыва
-    "chance_growth": 0.0001            # Рост шанса с множителем
+    "rtp": 0.75,  # RTP 75%
 }
 
 # 🗃️ БАЗА ДАННЫХ В ПАМЯТИ
@@ -46,11 +45,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 🚀 ФУНКЦИИ ИГРЫ "РАКЕТА"
-def calculate_explosion_chance(current_multiplier):
-    """Вычисляет шанс взрыва на основе текущего множителя"""
-    base_chance = ROCKET_CONFIG['base_explosion_chance']
-    growth = ROCKET_CONFIG['chance_growth'] * current_multiplier
-    return min(base_chance + growth, 0.5)  # Максимум 50% шанс
+def generate_crash_point():
+    """
+    Генерирует точку взрыва с RTP ~75%
+    Формула: crash_point = (1 - RTP) / (1 - random())
+    Это обеспечивает правильное распределение для заданного RTP
+    """
+    r = random.random()
+    crash_point = (1 - ROCKET_CONFIG['rtp']) / (1 - r)
+    
+    # Ограничиваем максимальным множителем
+    return min(crash_point, ROCKET_CONFIG['max_multiplier'])
+
+def calculate_explosion_chance(current_multiplier, crash_point):
+    """Вычисляет приблизительный шанс взрыва на основе текущего множителя и точки взрыва"""
+    if current_multiplier >= crash_point:
+        return 1.0
+    
+    # Вероятность взрыва увеличивается по мере приближения к crash_point
+    progress = current_multiplier / crash_point
+    base_chance = 0.01  # 1% базовый шанс
+    progress_chance = progress * 0.5  # До 50% при приближении к crash_point
+    
+    return min(base_chance + progress_chance, 0.9)  # Максимум 90%
 
 def create_progress_bar(multiplier, length=20):
     """Создает визуальный прогресс-бар"""
@@ -62,31 +79,10 @@ def create_progress_bar(multiplier, length=20):
 async def rocket_game_task(user_id, bet_amount, message, context):
     """Асинхронная задача для игры в ракету"""
     try:
-        # Проверка мгновенного взрыва
-        if random.random() < ROCKET_CONFIG['instant_explosion_chance']:
-            explosion_text = (
-                "💥 РАКЕТА ВЗОРВАЛАСЬ СРАЗУ!\n\n"
-                f"💰 Вы потеряли: {bet_amount} ⭐\n"
-                f"📈 Множитель: 1.00x\n\n"
-                "Ракета может взорваться на любом множителе!"
-            )
-            
-            keyboard = [
-                [InlineKeyboardButton("🎮 Играть снова", callback_data="play_rocket")],
-                [InlineKeyboardButton("📊 Профиль", callback_data="profile")]
-            ]
-            
-            await message.edit_text(
-                explosion_text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            
-            user_data[user_id]['total_games'] += 1
-            user_data[user_id]['total_wagered'] += bet_amount
-            if user_id in active_games:
-                del active_games[user_id]
-            return
-
+        # Генерируем точку взрыва с RTP 75%
+        crash_point = generate_crash_point()
+        logger.info(f"User {user_id}: crash_point = {crash_point:.2f}x")
+        
         multiplier = 1.00
         start_time = datetime.now()
         
@@ -96,16 +92,16 @@ async def rocket_game_task(user_id, bet_amount, message, context):
             
             # Обновляем множитель в активной игре
             active_games[user_id]['current_multiplier'] = multiplier
+            active_games[user_id]['crash_point'] = crash_point
             
             # Проверяем взрыв
-            explosion_chance = calculate_explosion_chance(multiplier)
-            if random.random() < explosion_chance:
-                # ВЗРЫВ - ДОБАВЛЕНО СООБЩЕНИЕ О ВЗРЫВЕ НА ЛЮБОМ МНОЖИТЕЛЕ
+            if multiplier >= crash_point:
+                # ВЗРЫВ
                 explosion_text = (
                     f"💥 РАКЕТА ВЗОРВАЛАСЬ НА {multiplier:.2f}x!\n\n"
                     f"💰 Вы потеряли: {bet_amount} ⭐\n"
-                    f"📈 Достигнут множитель: {multiplier:.2f}x\n"
-                    f"🎯 Шанс взрыва был: {explosion_chance*100:.1f}%\n\n"
+                    f"📈 Точка взрыва: {crash_point:.2f}x\n"
+                    f"🎯 RTP системы: {ROCKET_CONFIG['rtp']*100}%\n\n"
                     "💡 Ракета может взорваться на любом множителе!"
                 )
                 
@@ -129,6 +125,9 @@ async def rocket_game_task(user_id, bet_amount, message, context):
             potential_win = bet_amount * multiplier
             time_elapsed = (datetime.now() - start_time).total_seconds()
             
+            # Вычисляем приблизительный шанс взрыва
+            explosion_chance = calculate_explosion_chance(multiplier, crash_point)
+            
             keyboard = [
                 [InlineKeyboardButton(f"🎯 ЗАБРАТЬ {potential_win:.0f} ⭐", callback_data="cashout")],
                 [InlineKeyboardButton("💥 ОСТАНОВИТЬ", callback_data="stop_game")]
@@ -143,7 +142,7 @@ async def rocket_game_task(user_id, bet_amount, message, context):
                     f"📈 Множитель: {multiplier:.2f}x\n"
                     f"💰 Выигрыш: {potential_win:.0f} ⭐\n"
                     f"⏰ Время: {time_elapsed:.1f} сек\n"
-                    f"🎯 Шанс взрыва: {explosion_chance*100:.2f}%",
+                    f"🎯 Приблизительный шанс взрыва: {explosion_chance*100:.1f}%",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception as e:
@@ -155,7 +154,7 @@ async def rocket_game_task(user_id, bet_amount, message, context):
             await asyncio.sleep(ROCKET_CONFIG['time_step'])
             multiplier += ROCKET_CONFIG['multiplier_step']
         
-        # Достигнут максимальный множитель
+        # Достигнут максимальный множитель (очень редкий случай)
         win_amount = bet_amount * ROCKET_CONFIG['max_multiplier']
         user_data[user_id]['balance'] += win_amount
         user_data[user_id]['total_games'] += 1
@@ -186,7 +185,7 @@ async def rocket_game_task(user_id, bet_amount, message, context):
 # 👤 КОМАНДЫ ПОЛЬЗОВАТЕЛЯ
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    welcome_text = """
+    welcome_text = f"""
 🚀 ДОБРО ПОЖАЛОВАТЬ В ROCKET CASINO!
 
 Основные команды:
@@ -197,8 +196,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 ИГРА "РАКЕТА":
 • Ставка умножается на растущий множитель
 • Заберите выигрыш до взрыва ракеты
-• Множитель растет до 10000x
+• Множитель растет до {ROCKET_CONFIG['max_multiplier']}x
 • Ракета может взорваться в любой момент
+• RTP системы: {ROCKET_CONFIG['rtp']*100}%
     """
     
     keyboard = [
@@ -292,7 +292,7 @@ async def start_rocket_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка активной игры
     if user_id in active_games:
         if update.callback_query:
-            await update.callback_query.answer("У вас уже есть активная игра!", show_alert=True)
+            await update.callback_query.answer("❌ У вас уже есть активная игра!", show_alert=True)
         else:
             await update.message.reply_text("❌ У вас уже есть активная игра!")
         return
@@ -300,7 +300,7 @@ async def start_rocket_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка баланса
     if data['balance'] < bet_amount:
         if update.callback_query:
-            await update.callback_query.answer("Недостаточно средств!", show_alert=True)
+            await update.callback_query.answer("❌ Недостаточно средств!", show_alert=True)
             await update.callback_query.edit_message_text(
                 f"❌ Недостаточно средств!\n\n"
                 f"💰 Ваш баланс: {data['balance']:.0f} ⭐\n"
@@ -354,17 +354,18 @@ async def start_rocket_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cashout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer("✅ Вы успешно забрали выигрыш!")
     
     user_id = query.from_user.id
     
     if user_id not in active_games:
-        await query.answer("Игра не найдена или уже завершена!", show_alert=True)
+        await query.answer("❌ Игра не найдена или уже завершена!", show_alert=True)
         return
     
     # Получаем текущий множитель из активной игры
-    multiplier = active_games[user_id].get('current_multiplier', 1.0)
-    bet_amount = active_games[user_id]['bet_amount']
+    game_data = active_games[user_id]
+    multiplier = game_data.get('current_multiplier', 1.0)
+    bet_amount = game_data['bet_amount']
     win_amount = bet_amount * multiplier
     
     # Начисляем выигрыш
@@ -391,7 +392,7 @@ async def cashout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop_game_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer("🛑 Игра остановлена!")
     
     user_id = query.from_user.id
     
@@ -413,15 +414,21 @@ async def stop_game_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 👑 АДМИН КОМАНДЫ
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
+    
     user_id = query.from_user.id
     
     if user_id not in ADMIN_IDS:
-        await query.answer("Доступ запрещен!", show_alert=True)
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
         return
     
     total_balance = sum(data['balance'] for data in user_data.values())
     total_games = sum(data['total_games'] for data in user_data.values())
     total_wagered = sum(data['total_wagered'] for data in user_data.values())
+    total_won = sum(data['total_won'] for data in user_data.values())
+    
+    # Расчет RTP на основе реальных данных
+    actual_rtp = (total_won / total_wagered * 100) if total_wagered > 0 else 0
     
     admin_text = f"""
 👑 АДМИН ПАНЕЛЬ
@@ -431,6 +438,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 Общий баланс: {total_balance:.0f} ⭐
 🎮 Всего игр: {total_games}
 💸 Общий оборот: {total_wagered:.0f} ⭐
+🎁 Выплачено: {total_won:.0f} ⭐
+📈 Реальный RTP: {actual_rtp:.1f}%
 
 ⚡ Активных игр: {len(active_games)}
     """
@@ -475,7 +484,7 @@ async def admin_add_balance_handler(update: Update, context: ContextTypes.DEFAUL
     user_id = query.from_user.id
     
     if user_id not in ADMIN_IDS:
-        await query.answer("Доступ запрещен!", show_alert=True)
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
         return
     
     await query.edit_message_text(
@@ -535,13 +544,17 @@ def main():
     # Обработчики callback
     application.add_handler(CallbackQueryHandler(handle_callbacks))
     
-    # Обработчики для кнопок игры (ВАЖНО: регистрируем отдельно)
+    # Обработчики для кнопок игры (ВАЖНО: регистрируем отдельно с явными паттернами)
     application.add_handler(CallbackQueryHandler(cashout_handler, pattern="^cashout$"))
     application.add_handler(CallbackQueryHandler(stop_game_handler, pattern="^stop_game$"))
+    
+    # Обработчик для всех остальных callback (должен быть последним)
+    application.add_handler(CallbackQueryHandler(handle_callbacks))
     
     print("🚀 Rocket Casino Bot запущен!")
     print(f"⚡ Скорость игры: {ROCKET_CONFIG['time_step']} сек")
     print(f"📈 Максимальный множитель: {ROCKET_CONFIG['max_multiplier']}x")
+    print(f"🎯 RTP системы: {ROCKET_CONFIG['rtp']*100}%")
     
     application.run_polling()
 
